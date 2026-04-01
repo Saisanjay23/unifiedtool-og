@@ -1,0 +1,35 @@
+# ─── Secrets & Credentials ───
+.env
+sessions/
+*.session
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# ─── Node / Frontend ───
+node_modules/
+frontend/dist/
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
+
+# ─── Exports & Logs ───
+exports/
+logs/
+
+# ─── Tooling artifacts ───
+.ruff_cache/
+vulture_output.txt
+codebase_map.json

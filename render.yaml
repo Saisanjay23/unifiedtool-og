@@ -1,0 +1,26 @@
+# Render.com deployment config
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: unified-social-media-tool
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: DEFAULT_HEADLESS
+        value: true
+      - key: MONGO_URI
+        sync: false  # Set this manually in Render dashboard
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: ALLOWED_CORS_ORIGINS
+        value: "*"

@@ -1,0 +1,15 @@
+[
+    {
+        "job_id": "example_instagram_daily",
+        "client": "default_client",
+        "platforms": [
+            "instagram"
+        ],
+        "keywords": [
+            "cybersecurity",
+            "infosec"
+        ],
+        "schedule": "0 8 * * *",
+        "max_results": 50
+    }
+]
