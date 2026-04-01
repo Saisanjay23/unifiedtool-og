@@ -184,6 +184,17 @@ export default function App() {
     const activeJobs = useStore((s) => s.activeJobs);
     const activeJobCount = Object.keys(activeJobs).length;
 
+    const [visitedPages, setVisitedPages] = useState(new Set([PAGES.dashboard, `${PAGES.platform}_${activePlatform}`]));
+
+    useEffect(() => {
+        setVisitedPages((prev) => {
+            const next = new Set(prev);
+            if (page === PAGES.platform) next.add(`${PAGES.platform}_${activePlatform}`);
+            else next.add(page);
+            return next;
+        });
+    }, [page, activePlatform]);
+
     useEffect(() => {
         document.documentElement.setAttribute('data-theme', theme);
     }, [theme]);
@@ -353,14 +364,29 @@ export default function App() {
 
                     {/* Main scrollable content */}
                     <main className="app-main">
-                        {page === PAGES.dashboard && <Dashboard />}
-
-                        {page === PAGES.platform && (
-                            <PlatformView key={activePlatform} platformId={activePlatform} />
+                        {visitedPages.has(PAGES.dashboard) && (
+                            <div style={{ display: page === PAGES.dashboard ? 'block' : 'none', height: '100%' }}>
+                                <Dashboard />
+                            </div>
                         )}
 
-                        {page === PAGES.sessions && <SessionLogin />}
-                        {page === PAGES.cron && <CronManager />}
+                        {PLATFORMS.map((p) => visitedPages.has(`${PAGES.platform}_${p.id}`) && (
+                            <div key={p.id} style={{ display: page === PAGES.platform && activePlatform === p.id ? 'block' : 'none', height: '100%' }}>
+                                <PlatformView platformId={p.id} />
+                            </div>
+                        ))}
+
+                        {visitedPages.has(PAGES.sessions) && (
+                            <div style={{ display: page === PAGES.sessions ? 'block' : 'none', height: '100%' }}>
+                                <SessionLogin />
+                            </div>
+                        )}
+                        
+                        {visitedPages.has(PAGES.cron) && (
+                            <div style={{ display: page === PAGES.cron ? 'block' : 'none', height: '100%' }}>
+                                <CronManager />
+                            </div>
+                        )}
                     </main>
                 </div>
             </div>
