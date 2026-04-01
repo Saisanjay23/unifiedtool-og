@@ -90,7 +90,8 @@ export const getAllSessionStatuses = async () => {
 
 // -- WebSocket with auto-reconnect --
 export function connectJobWebSocket(jobId, onEvent, { onReconnect, maxRetries = 10 } = {}) {
-    const wsBase = API_BASE.replace(/^http/, 'ws') || `ws://${window.location.host}`;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsBase = API_BASE.replace(/^http/, 'ws') || `${wsProtocol}//${window.location.host}`;
     let retries = 0;
     let ws = null;
     let closed = false;
