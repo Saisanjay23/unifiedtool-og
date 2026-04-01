@@ -373,11 +373,12 @@ export default function PlatformView({ platformId }) {
             </div>
 
             {/* Tab content — Discovery passes analyze callback, Analysis receives pre-filled URLs */}
-            {activeMode === 'discovery' ? (
+            <div style={{ display: activeMode === 'discovery' ? 'block' : 'none' }}>
                 <DiscoveryTab activePlatform={platformId} selectedClient={selectedClient} onAnalyzeUrls={handleAnalyzeUrls} />
-            ) : (
+            </div>
+            <div style={{ display: activeMode === 'analysis' ? 'block' : 'none' }}>
                 <AnalysisTab activePlatform={platformId} selectedClient={selectedClient} initialUrls={pendingAnalysisUrls} />
-            )}
+            </div>
         </div>
     );
 }
