@@ -16,7 +16,19 @@ const api = axios.create({
 // normalize error responses
 api.interceptors.response.use(
     (res) => res,
-    (err) => {
+    async (err) => {
+        // If response is a blob, we need to read it as text to extract JSON error
+        if (err.response?.data instanceof Blob && err.response.data.type === 'application/json') {
+            try {
+                const text = await err.response.data.text();
+                const json = JSON.parse(text);
+                const message = json.detail || err.message || 'Request failed';
+                return Promise.reject(new Error(message));
+            } catch (e) {
+                // fallback
+            }
+        }
+
         const message = err.response?.data?.detail || err.message || 'Request failed';
         return Promise.reject(new Error(message));
     }
@@ -93,22 +105,33 @@ export function connectJobWebSocket(jobId, onEvent, { onReconnect, maxRetries = 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     let wsBase = API_BASE || `${window.location.protocol}//${window.location.host}`;
     wsBase = wsBase.replace(/^https?/, wsProtocol.replace(':', ''));
+    const terminalEvents = new Set(['completed', 'failed', 'cancelled', 'error']);
     let retries = 0;
+    let lastSeq = 0;
     let ws = null;
     let closed = false;
 
     function connect() {
-        ws = new WebSocket(`${wsBase}/ws/jobs/${jobId}`);
+        const query = lastSeq > 0 ? `?after_seq=${lastSeq}` : '';
+        const hadRetries = retries > 0;
+        ws = new WebSocket(`${wsBase}/ws/jobs/${jobId}${query}`);
 
         ws.onopen = () => {
             retries = 0; // reset on successful connection
-            if (onReconnect && retries > 0) onReconnect(true);
+            if (onReconnect && hadRetries) onReconnect(true);
         };
 
         ws.onmessage = (e) => {
             try {
                 const data = JSON.parse(e.data);
+                if (typeof data.seq === 'number') {
+                    lastSeq = Math.max(lastSeq, data.seq);
+                }
                 onEvent(data);
+                if (terminalEvents.has(data.event_type)) {
+                    closed = true;
+                    ws?.close(1000, 'terminal event received');
+                }
             } catch (err) {
                 console.error('WebSocket parse error:', err);
             }

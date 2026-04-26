@@ -8,18 +8,14 @@ Uses authenticated session + stealth anti-bot overrides to avoid CAPTCHA.
 """
 
 import asyncio
-import base64
 import json
 import random
 import re
-from typing import Optional
 
-from backend.core.config import Settings
 from backend.core.db import ProfileResult
-from backend.core.health import HealthManager
 from backend.core.logger import get_logger
-from backend.stealth.human import HumanBehavior
 from backend.platforms.base import AbstractDiscoverer
+from backend.stealth.human import HumanBehavior
 
 logger = get_logger("platforms.tiktok.discovery")
 
@@ -163,7 +159,8 @@ class TikTokDiscoverer(AbstractDiscoverer):
                         headless=headless,
                         session_file=session_file,
                     )
-                    page.on("response", on_response)
+                    # NOTE: on_response is defined inside _search_keyword(), not here.
+                    # It will be re-attached when _search_keyword() is called below.
                     logger.info(
                         "Successfully recreated browser context for recovery."
                     )
@@ -1065,7 +1062,7 @@ class TikTokDiscoverer(AbstractDiscoverer):
                 if isinstance(item, (dict, list)):
                     self._walk_api_node(item, api_data)
 
-    def _parse_follower_count(self, text: str) -> Optional[int]:
+    def _parse_follower_count(self, text: str) -> int | None:
         """Parse follower counts like '1.2M Followers', '540K', '12.5K Followers', or raw numbers like '1234567'."""
         if not text:
             return None

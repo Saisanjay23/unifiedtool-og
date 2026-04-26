@@ -6,10 +6,11 @@ ensuring that high-frequency I/O completely unblocks WebSocket consumers.
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable, Coroutine
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Optional
 
 from backend.core.config import settings
 from backend.core.logger import get_logger
@@ -26,11 +27,12 @@ class ProgressEvent:
 
     job_id: str
     platform: str
-    event_type: str  # started, result_found, progress, completed, failed, rate_limited
+    event_type: str  # started, result_found, progress, completed, failed, cancelled, rate_limited
     message: str
+    seq: int = 0
     count_found: int = 0
-    count_total: Optional[int] = None
-    result: Optional[dict] = None
+    count_total: int | None = None
+    result: dict | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
@@ -76,11 +78,11 @@ class JobStatus:
     progress: float = 0.0
     message: str = "Queued"
     count_found: int = 0
-    count_total: Optional[int] = None
-    error: Optional[str] = None
+    count_total: int | None = None
+    error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     config: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -113,7 +115,9 @@ class JobManager:
 
         self._jobs: dict[str, JobStatus] = {}
         self._tasks: dict[str, asyncio.Task] = {}
-        self._queues: dict[str, asyncio.Queue] = {}
+        self._history: dict[str, list[ProgressEvent]] = {}
+        self._subscribers: dict[str, set[asyncio.Queue]] = {}
+        self._next_seq: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
 
@@ -128,7 +132,7 @@ class JobManager:
         client: str,
         keywords: list[str],
         run_fn: Callable[..., Coroutine],
-        config: Optional[dict] = None,
+        config: dict | None = None,
     ) -> str:
         """
         Task Orchestration injection point.
@@ -156,15 +160,15 @@ class JobManager:
             config=config,
         )
 
-        progress_queue: asyncio.Queue = asyncio.Queue()
-
         async with self._lock:
             self._jobs[job_id] = job
-            self._queues[job_id] = progress_queue
+            self._history[job_id] = []
+            self._subscribers[job_id] = set()
+            self._next_seq[job_id] = 0
 
         # wrap the actual work in a managed task
         task = asyncio.create_task(
-            self._run_job(job_id, run_fn, progress_queue, config)
+            self._run_job(job_id, run_fn, config)
         )
         self._tasks[job_id] = task
 
@@ -175,7 +179,6 @@ class JobManager:
         self,
         job_id: str,
         run_fn: Callable[..., Coroutine],
-        progress_queue: asyncio.Queue,
         config: dict,
     ):
         """
@@ -191,13 +194,14 @@ class JobManager:
             job.started_at = datetime.now(timezone.utc)
             job.message = "Starting..."
 
-            await progress_queue.put(
+            await self._publish_event(
+                job_id,
                 ProgressEvent(
                     job_id=job_id,
                     platform=job.platform,
                     event_type="started",
                     message=f"Job started for {job.platform}/{job.mode}",
-                )
+                ),
             )
 
             try:
@@ -206,16 +210,17 @@ class JobManager:
                     event_type: str,
                     message: str,
                     count_found: int = 0,
-                    count_total: Optional[int] = None,
-                    result: Optional[dict] = None,
+                    count_total: int | None = None,
+                    result: dict | None = None,
                 ):
                     job.message = message
-                    job.count_found = count_found
+                    job.count_found = max(job.count_found, count_found)
                     if count_total is not None:
                         job.count_total = count_total
-                        job.progress = (
+                        current_progress = (
                             count_found / count_total if count_total > 0 else 0.0
                         )
+                        job.progress = max(job.progress, current_progress)
 
                     event = ProgressEvent(
                         job_id=job_id,
@@ -226,7 +231,7 @@ class JobManager:
                         count_total=count_total,
                         result=result,
                     )
-                    await progress_queue.put(event)
+                    await self._publish_event(job_id, event)
 
                 await run_fn(
                     progress_callback=progress_callback,
@@ -240,14 +245,15 @@ class JobManager:
                 job.message = f"Completed — found {job.count_found} results"
                 job.finished_at = datetime.now(timezone.utc)
 
-                await progress_queue.put(
+                await self._publish_event(
+                    job_id,
                     ProgressEvent(
                         job_id=job_id,
                         platform=job.platform,
                         event_type="completed",
                         message=job.message,
                         count_found=job.count_found,
-                    )
+                    ),
                 )
 
                 logger.info(f"Job completed: {job_id} ({job.count_found} results)")
@@ -257,13 +263,16 @@ class JobManager:
                 job.message = "Cancelled by user"
                 job.finished_at = datetime.now(timezone.utc)
 
-                await progress_queue.put(
+                await self._publish_event(
+                    job_id,
                     ProgressEvent(
                         job_id=job_id,
                         platform=job.platform,
-                        event_type="failed",
+                        event_type="cancelled",
                         message="Job cancelled",
-                    )
+                        count_found=job.count_found,
+                        count_total=job.count_total,
+                    ),
                 )
                 logger.info(f"Job cancelled: {job_id}")
 
@@ -273,13 +282,16 @@ class JobManager:
                 job.message = f"Failed: {exc}"
                 job.finished_at = datetime.now(timezone.utc)
 
-                await progress_queue.put(
+                await self._publish_event(
+                    job_id,
                     ProgressEvent(
                         job_id=job_id,
                         platform=job.platform,
                         event_type="failed",
                         message=f"Error: {exc}",
-                    )
+                        count_found=job.count_found,
+                        count_total=job.count_total,
+                    ),
                 )
                 logger.error(f"Job failed: {job_id} — {exc}", exc_info=True)
 
@@ -296,14 +308,47 @@ class JobManager:
                 return True
         return False
 
-    def get_job_status(self, job_id: str) -> Optional[JobStatus]:
+    def get_job_status(self, job_id: str) -> JobStatus | None:
         return self._jobs.get(job_id)
 
     def get_all_jobs(self) -> list[dict]:
         return [job.to_dict() for job in self._jobs.values()]
 
-    def get_progress_queue(self, job_id: str) -> Optional[asyncio.Queue]:
-        return self._queues.get(job_id)
+    async def subscribe(
+        self, job_id: str, after_seq: int = 0
+    ) -> tuple[list[ProgressEvent], asyncio.Queue] | None:
+        """
+        Register a live subscriber and return any backlog after the provided sequence.
+        """
+        async with self._lock:
+            if job_id not in self._jobs:
+                return None
+
+            queue: asyncio.Queue = asyncio.Queue()
+            history = [
+                event for event in self._history.get(job_id, []) if event.seq > after_seq
+            ]
+            self._subscribers.setdefault(job_id, set()).add(queue)
+            return history, queue
+
+    async def unsubscribe(self, job_id: str, queue: asyncio.Queue) -> None:
+        async with self._lock:
+            subscribers = self._subscribers.get(job_id)
+            if subscribers is not None:
+                subscribers.discard(queue)
+
+    async def _publish_event(self, job_id: str, event: ProgressEvent) -> None:
+        async with self._lock:
+            next_seq = self._next_seq.get(job_id, 0) + 1
+            self._next_seq[job_id] = next_seq
+            event.seq = next_seq
+
+            history = self._history.setdefault(job_id, [])
+            history.append(event)
+            subscribers = list(self._subscribers.get(job_id, ()))
+
+        for subscriber in subscribers:
+            subscriber.put_nowait(event)
 
     async def cleanup_finished(self, max_age_seconds: int = 3600):
         """
@@ -325,23 +370,35 @@ class JobManager:
             for job_id in to_remove:
                 self._jobs.pop(job_id, None)
                 self._tasks.pop(job_id, None)
-                self._queues.pop(job_id, None)
+                self._history.pop(job_id, None)
+                self._subscribers.pop(job_id, None)
+                self._next_seq.pop(job_id, None)
 
         if to_remove:
             logger.info(f"Cleaned up {len(to_remove)} finished jobs")
 
     async def run_cleanup_loop(self, interval_seconds: int = 600, max_age_seconds: int = 3600):
         """Background task: Periodically sweeps memory for finished jobs."""
-        while True:
-            await asyncio.sleep(interval_seconds)
-            await self.cleanup_finished(max_age_seconds)
+        try:
+            while True:
+                await asyncio.sleep(interval_seconds)
+                await self.cleanup_finished(max_age_seconds)
+        except asyncio.CancelledError:
+            logger.info("Job cleanup loop stopped")
+            raise
 
     async def cancel_all(self):
         """
         Critical SIGTERM hook. 
         Ensures zombie browser processes aren't left orphaned on disk during ungraceful server restarts.
         """
+        tasks_to_wait: list[asyncio.Task] = []
+
         for job_id, task in list(self._tasks.items()):
             if not task.done():
                 task.cancel()
+                tasks_to_wait.append(task)
                 logger.info(f"Shutdown: cancelled job {job_id}")
+
+        if tasks_to_wait:
+            await asyncio.gather(*tasks_to_wait, return_exceptions=True)

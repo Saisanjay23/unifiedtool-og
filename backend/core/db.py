@@ -5,18 +5,17 @@ This prevents collection locking contention under high scrape loads and sets the
 while maintaining a strict, unified bounded context (`ProfileResult`) to ensure aggregation queries remain generic.
 """
 
-import asyncio
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient  # type: ignore
-from pymongo.errors import PyMongoError, AutoReconnect, ServerSelectionTimeoutError  # type: ignore
+from pymongo.errors import AutoReconnect, PyMongoError, ServerSelectionTimeoutError  # type: ignore
 from tenacity import (  # type: ignore
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
 
 from backend.core.config import settings  # type: ignore
@@ -25,7 +24,7 @@ from backend.core.logger import get_logger  # type: ignore
 logger = get_logger("db")
 
 # ---- Global client (lazy init) ----
-_client: Optional[AsyncIOMotorClient] = None
+_client: AsyncIOMotorClient | None = None
 COLLECTION_NAME = "search_results"
 PRESETS_COLLECTION = "keyword_presets"
 GLOBAL_CLIENTS_COLLECTION = "clients"  # Store clients globally
@@ -48,30 +47,30 @@ class ProfileResult:
     username: str = ""
     display_name: str = ""
     bio: str = ""
-    followers: Optional[int] = None
-    following: Optional[int] = None
-    post_count: Optional[int] = None
+    followers: int | None = None
+    following: int | None = None
+    post_count: int | None = None
     profile_image_url: str = ""
-    profile_image_b64: Optional[str] = None
+    profile_image_b64: str | None = None
     is_verified: bool = False
-    location: Optional[str] = None
-    created_at: Optional[str] = None
-    last_active: Optional[str] = None
+    location: str | None = None
+    created_at: str | None = None
+    last_active: str | None = None
     status: str = "pending"
-    screenshot_b64: Optional[str] = None
+    screenshot_b64: str | None = None
     risk_score: int = 0
     has_logo: bool = False
     is_active: bool = False
     has_name_match: bool = False
-    last_post_date: Optional[str] = None
+    last_post_date: str | None = None
     comments: str = ""
     priority: str = "Low"
     original_name: str = ""
     original_feed: str = ""
     entity_type: str = ""
     confidence: str = ""
-    first_seen: Optional[datetime] = None
-    last_seen: Optional[datetime] = None
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
     schema_version: int = 2
 
     def __post_init__(self):
@@ -245,6 +244,11 @@ async def save_result(result: ProfileResult) -> tuple[str, bool]:
                 "risk_score": doc.get("risk_score", 0),
                 "has_logo": doc.get("has_logo", False),
                 "is_active": doc.get("is_active", False),
+                "has_name_match": doc.get("has_name_match", False),
+                "priority": doc.get("priority", "Low"),
+                "comments": doc.get("comments", ""),
+                "original_name": doc.get("original_name", ""),
+                "original_feed": doc.get("original_feed", ""),
                 "confidence": doc.get("confidence", ""),
                 "entity_type": doc.get("entity_type", ""),
                 "last_seen": now,
@@ -290,11 +294,11 @@ async def bulk_save_results(results: list[ProfileResult]) -> int:
 
 async def get_results(
     client: str,
-    platform: Optional[str] = None,
-    status: Optional[str] = None,
-    since: Optional[datetime] = None,
-    keyword: Optional[str] = None,
-    confidence: Optional[str] = None,
+    platform: str | None = None,
+    status: str | None = None,
+    since: datetime | None = None,
+    keyword: str | None = None,
+    confidence: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -342,7 +346,7 @@ async def get_results(
     return all_results[offset : offset + limit], total_count  # type: ignore
 
 
-async def get_result_full(doc_id: str, platform: str) -> Optional[dict]:
+async def get_result_full(doc_id: str, platform: str) -> dict | None:
     """Fetch a single result with all fields (including images)."""
     from bson import ObjectId  # type: ignore
 
@@ -488,7 +492,7 @@ async def get_keyword_presets(client: str, platform: str) -> list[dict]:
 
 
 async def get_keywords_for_client(
-    client: str, platform: Optional[str] = None
+    client: str, platform: str | None = None
 ) -> list[str]:
     """Return unique keywords associated with a client's results."""
     all_keywords = set()
@@ -510,7 +514,7 @@ async def get_keywords_for_client(
 
 
 async def get_known_urls_for_client(
-    client: str, platform: Optional[str] = None
+    client: str, platform: str | None = None
 ) -> list[str]:
     """Return all known URLs for a client (across all statuses) for dedup."""
     all_urls = set()

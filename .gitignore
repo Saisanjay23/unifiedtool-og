@@ -1,35 +1,60 @@
-# ─── Secrets & Credentials ───
+# Secrets and credentials
 .env
 sessions/
 *.session
 
-# ─── Python ───
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
 
-# ─── Node / Frontend ───
+# Node / frontend
 node_modules/
+frontend/node_modules/
 frontend/dist/
+.npm-cache/
 
-# ─── IDE ───
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# ─── OS ───
+# OS
 .DS_Store
 Thumbs.db
 
-# ─── Exports & Logs ───
+# Exports and logs
 exports/
 logs/
+*.log
 
-# ─── Tooling artifacts ───
+# Tooling artifacts
 .ruff_cache/
 vulture_output.txt
 codebase_map.json
+
+# Debug / diagnostic artifacts
+test_fb_*.py
+test_dump_*.py
+test_sniff_*.py
+verify_fb_*.py
+diag_*.py
+diag_*.png
+fb_*.txt
+fb_*.html
+fb_*.png
+meta_*.txt
+meta_*.html
+hovercard_diag.txt
+modi_transp.txt
+timestamp_sniffer.txt

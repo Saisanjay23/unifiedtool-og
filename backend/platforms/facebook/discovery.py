@@ -7,18 +7,14 @@ without triggering additional network requests.
 """
 
 import asyncio
-import base64
 import json
 import random
 import re
-from typing import Optional
 
-from backend.core.config import Settings
 from backend.core.db import ProfileResult
-from backend.core.health import HealthManager
 from backend.core.logger import get_logger
-from backend.stealth.human import HumanBehavior
 from backend.platforms.base import AbstractDiscoverer
+from backend.stealth.human import HumanBehavior
 
 logger = get_logger("platforms.facebook.discovery")
 
@@ -52,7 +48,7 @@ def _upgrade_image_url(url: str) -> str:
     # Remove crop boxes like /c0.0.120.120a/
     upgraded = re.sub(r"/c[\d.]+a?/", "/", upgraded)
     # Remove crop param /cp0/
-    upplaced = re.sub(r"/cp\d+/", "/", upgraded)
+    upgraded = re.sub(r"/cp\d+/", "/", upgraded)
     # Remove width params like /w_n_/ or /w\d+/
     upgraded = re.sub(r"/w_?\d*_?/", "/", upgraded)
     # Clean up double slashes (but not in https://)
@@ -246,6 +242,18 @@ class FacebookDiscoverer(AbstractDiscoverer):
 
             await human.pause("page_load")
             await self._dismiss_popups(page)
+
+            # --- LOGIN WALL DETECTION ---
+            current_url = page.url.lower()
+            if "/login" in current_url or "/checkpoint" in current_url:
+                logger.error(f"Facebook redirected to login/checkpoint page: {page.url}")
+                await progress_callback(
+                    event_type="error",
+                    message="Facebook session expired. Please log in via Sidebar to refresh cookies.",
+                    count_found=current_total + len(profiles),
+                    count_total=max_total,
+                )
+                return profiles
 
             # Wait for actual search results to render, but don't crash if they don't
             try:
@@ -462,36 +470,41 @@ class FacebookDiscoverer(AbstractDiscoverer):
                     empty_scrolls += 1
 
                     # Try clicking "See more results" / pagination buttons Safely
+                    # NOTE: Must use pure JS text matching — Playwright's :has-text()
+                    # pseudo-selector does NOT work inside page.evaluate/document.querySelector
                     see_more_clicked = False
-                    see_more_selectors = [
-                        'div[role="button"]:has-text("See more results")',
-                        'div[role="button"]:has-text("See More")',
-                        'span:has-text("See more results")',
-                        'a:has-text("See more results")',
-                    ]
-                    for sel in see_more_selectors:
-                        try:
-                            # Use evaluate to click safely avoiding Playwright IPC hangs
-                            clicked = await asyncio.wait_for(
-                                page.evaluate(f"""
-                                    () => {{
-                                        const el = document.querySelector('{sel.replace("'", "\\'")}');
-                                        if (el && el.offsetParent !== null) {{
-                                            el.click();
-                                            return true;
-                                        }}
-                                        return false;
-                                    }}
-                                """),
-                                timeout=5.0
-                            )
-                            if clicked:
-                                await asyncio.sleep(3)
-                                see_more_clicked = True
-                                empty_scrolls = max(0, empty_scrolls - 2)
-                                break
-                        except Exception:
-                            pass
+                    try:
+                        clicked = await asyncio.wait_for(
+                            page.evaluate("""
+                                () => {
+                                    const phrases = ['see more results', 'see more', 'show more results'];
+                                    // Check buttons and role=button divs
+                                    const candidates = [
+                                        ...document.querySelectorAll('div[role="button"]'),
+                                        ...document.querySelectorAll('a'),
+                                        ...document.querySelectorAll('span'),
+                                        ...document.querySelectorAll('button'),
+                                    ];
+                                    for (const el of candidates) {
+                                        const text = (el.textContent || '').trim().toLowerCase();
+                                        if (phrases.some(p => text === p || text.startsWith(p))) {
+                                            if (el.offsetParent !== null) {
+                                                el.click();
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    return false;
+                                }
+                            """),
+                            timeout=5.0
+                        )
+                        if clicked:
+                            await asyncio.sleep(3)
+                            see_more_clicked = True
+                            empty_scrolls = max(0, empty_scrolls - 2)
+                    except Exception:
+                        pass
 
                     if not see_more_clicked:
                         # Check if page height stopped growing

@@ -10,19 +10,18 @@ bio, followers, following, likes, verified status, profile image, and screenshot
 
 import asyncio
 import base64
-import json
 import os
 import random
 import re
 from datetime import datetime, timedelta
-from typing import Optional
 
-from backend.core.config import Settings
+import requests as req_lib
+
 from backend.core.db import ProfileResult
-from backend.core.health import HealthManager
 from backend.core.logger import get_logger
-from backend.stealth.human import HumanBehavior
 from backend.platforms.base import AbstractAnalyzer
+from backend.stealth.browser import create_stealth_browser
+from backend.stealth.human import HumanBehavior
 
 logger = get_logger("platforms.tiktok.analysis")
 
@@ -86,40 +85,54 @@ class TikTokAnalyzer(AbstractAnalyzer):
         url: str,
         client: str,
         headless: bool = True,
-        semaphore: Optional[asyncio.Semaphore] = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> ProfileResult:
+        """Legacy single-profile analysis. Launches its own browser."""
+        sem = semaphore or asyncio.Semaphore(1)
+        async with sem:
+            # Use authenticated session if available
+            session_file = os.path.join(self.config.SESSION_PATH, "tiktok.json")
+            if not os.path.exists(session_file):
+                session_file = None
+            
+            pw, browser, context, page = await create_stealth_browser(
+                platform="tiktok",
+                headless=headless,
+                session_file=session_file,
+            )
+            try:
+                return await self._do_analysis(page, url, client, browser_context=context)
+            finally:
+                if page and not page.is_closed():
+                    await page.close()
+                if browser:
+                    await browser.close()
+                if pw:
+                    await pw.stop()
 
-        human = HumanBehavior(platform="tiktok")
-
-        if semaphore:
-            async with semaphore:
-                return await self._do_analyze(url, client, headless, human)
-        else:
-            return await self._do_analyze(url, client, headless, human)
-
-    async def _do_analyze(
+    async def analyze_with_page(
         self,
         url: str,
         client: str,
-        headless: bool,
-        human: HumanBehavior,
+        page,
     ) -> ProfileResult:
+        """Pool-optimized analysis. Uses a pre-existing stealth page (tab)."""
+        return await self._do_analysis(page, url, client)
+
+    async def _do_analysis(
+        self,
+        page,
+        url: str,
+        client: str,
+        browser_context=None,
+    ) -> ProfileResult:
+        """Core analysis logic."""
+        human = HumanBehavior(platform="tiktok")
+        
+        # Removed dummy lock to fix parse error
         """Core analysis logic — navigate, extract via 3 layers, screenshot."""
-        from backend.stealth.browser import create_stealth_browser
-
-        # Use authenticated session if available
-        session_file = os.path.join(self.config.SESSION_PATH, "tiktok.json")
-        if not os.path.exists(session_file):
-            session_file = None
-            logger.info("TikTok analysis: No saved session, running unauthenticated.")
-        else:
-            logger.info("TikTok analysis: Using saved session for authentication.")
-
-        pw, browser, context, page = await create_stealth_browser(
-            platform="tiktok",
-            headless=headless,
-            session_file=session_file,
-        )
+        # Browser lifecycle is managed by the caller
+        logger.info(f"[{url}] Analysis starting using provided page.")
 
         # Extract username from URL for keyword field
         username = ""
@@ -148,8 +161,7 @@ class TikTokAnalyzer(AbstractAnalyzer):
                 ])
                 if response.status == 200:
                     try:
-                        body = await response.text()
-                        data = json.loads(body)
+                        data = await response.json()
                         if is_profile_api:
                             self._walk_api_profile(data, api_profile_data)
                         if is_post_api:
@@ -1013,7 +1025,7 @@ class TikTokAnalyzer(AbstractAnalyzer):
                             last_post_date = self._parse_date(video_date)
                             logger.info(f"  ✅ Extracted last post date from video page: {video_date} → {last_post_date}")
                         else:
-                            logger.info(f"  ⚠️ Could not extract date from video page")
+                            logger.info("  ⚠️ Could not extract date from video page")
 
                         # Navigate back to the profile page
                         await page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -1097,7 +1109,6 @@ class TikTokAnalyzer(AbstractAnalyzer):
             profile_image_b64 = None
             if image_url:
                 try:
-                    import requests as req_lib
 
                     img_resp = await asyncio.to_thread(
                         lambda: req_lib.get(
@@ -1145,8 +1156,8 @@ class TikTokAnalyzer(AbstractAnalyzer):
             return self._empty_result(url, client, username)
 
         finally:
-            await browser.close()
-            await pw.stop()
+            # Browser is managed by the caller
+            pass
 
     def _walk_api_profile(self, node, api_data: dict):
         """Recursively walk API response JSON looking for user profile data.
@@ -1235,7 +1246,7 @@ class TikTokAnalyzer(AbstractAnalyzer):
                 if isinstance(item, (dict, list)):
                     self._extract_post_timestamps(item, timestamps)
 
-    def _parse_count(self, text: str) -> Optional[int]:
+    def _parse_count(self, text: str) -> int | None:
         """Parse counts like '1.2M', '540K', '12500', or raw numbers."""
         if not text:
             return None

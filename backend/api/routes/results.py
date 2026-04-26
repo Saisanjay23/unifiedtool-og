@@ -4,25 +4,22 @@ Handles querying, updating, editing, and exporting discovered/analyzed profiles.
 Exports match the old Social Media Tool's exact column format with embedded screenshots.
 """
 
-import io
-import os
 import base64
+import io
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.core.config import settings
 from backend.core.db import (
-    get_results,
-    get_result_full,
-    update_status,
-    update_fields,
+    SUPPORTED_PLATFORMS,
     get_keywords_for_client,
     get_known_urls_for_client,
-    SUPPORTED_PLATFORMS,
+    get_result_full,
+    get_results,
+    update_fields,
+    update_status,
 )
 from backend.core.logger import get_logger
 
@@ -129,7 +126,7 @@ def calculate_risk_score(doc: dict) -> tuple[int, str]:
 @router.get("/results/{client}/keywords")
 async def list_keywords(
     client: str,
-    platform: Optional[str] = Query(None),
+    platform: str | None = Query(None),
 ):
     """Return unique keywords associated with a client's results."""
     if platform and platform not in SUPPORTED_PLATFORMS:
@@ -142,7 +139,7 @@ async def list_keywords(
 @router.get("/results/{client}/known-urls")
 async def list_known_urls(
     client: str,
-    platform: Optional[str] = Query(None),
+    platform: str | None = Query(None),
 ):
     """Return all known URLs for a client (any status) for frontend dedup."""
     if platform and platform not in SUPPORTED_PLATFORMS:
@@ -155,10 +152,10 @@ async def list_known_urls(
 @router.get("/results/{client}")
 async def query_results(
     client: str,
-    platform: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    keyword: Optional[str] = Query(None),
-    confidence: Optional[str] = Query(None),
+    platform: str | None = Query(None),
+    status: str | None = Query(None),
+    keyword: str | None = Query(None),
+    confidence: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -249,8 +246,8 @@ async def edit_fields(doc_id: str, req: UpdateFieldsRequest):
 @router.get("/results/{client}/export")
 async def export_results(
     client: str,
-    platform: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
+    platform: str | None = Query(None),
+    status: str | None = Query(None),
 ):
     """
     Export results as an Excel file matching the old tool's exact format.

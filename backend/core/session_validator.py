@@ -90,6 +90,21 @@ class SessionValidator:
         """Clear all cached validation results."""
         self._cache.clear()
 
+    @staticmethod
+    def _result(
+        *,
+        valid: bool,
+        reason: str,
+        checked_at: str,
+        uncertain: bool = False,
+    ) -> dict:
+        return {
+            "valid": valid,
+            "checked_at": checked_at,
+            "reason": reason,
+            "uncertain": uncertain,
+        }
+
     async def validate(self, platform: str) -> dict:
         """
         Validate a platform session. Returns cached result if within TTL.
@@ -104,11 +119,11 @@ class SessionValidator:
             # For YouTube, validate the API key instead
             if platform == "youtube":
                 return await self._validate_youtube_api_key()
-            return {
-                "valid": True,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-                "reason": "skip",
-            }
+            return self._result(
+                valid=True,
+                checked_at=datetime.now(timezone.utc).isoformat(),
+                reason="skip",
+            )
 
         # Check cache
         cached = self._cache.get(platform)
@@ -117,6 +132,7 @@ class SessionValidator:
                 "valid": cached["valid"],
                 "checked_at": cached["checked_at"],
                 "reason": cached["reason"],
+                "uncertain": cached.get("uncertain", False),
             }
 
         # Run validation in thread pool to avoid blocking
@@ -124,12 +140,12 @@ class SessionValidator:
             result = await asyncio.to_thread(self._validate_sync, platform)
         except Exception as e:
             logger.warning(f"Session validation error for {platform}: {e}")
-            # On error, assume valid (no false negatives from network issues)
-            result = {
-                "valid": True,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-                "reason": "validation_error",
-            }
+            result = self._result(
+                valid=False,
+                checked_at=datetime.now(timezone.utc).isoformat(),
+                reason="validation_error",
+                uncertain=True,
+            )
 
         # Cache the result
         self._cache[platform] = {**result, "_ts": time.time()}
@@ -143,17 +159,29 @@ class SessionValidator:
         # Load cookies from session file
         session_file = os.path.join(settings.SESSION_PATH, f"{platform}.json")
         if not os.path.exists(session_file):
-            return {"valid": False, "checked_at": now_str, "reason": "no_session_file"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="no_session_file",
+            )
 
         try:
-            with open(session_file, "r", encoding="utf-8") as f:
+            with open(session_file, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            return {"valid": False, "checked_at": now_str, "reason": "corrupt_session_file"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="corrupt_session_file",
+            )
 
         cookies_list = data.get("cookies", [])
         if not cookies_list:
-            return {"valid": False, "checked_at": now_str, "reason": "no_cookies"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="no_cookies",
+            )
 
         # Build a requests cookie jar from the Playwright session cookies
         jar = req_lib.cookies.RequestsCookieJar()
@@ -180,13 +208,28 @@ class SessionValidator:
             )
         except req_lib.exceptions.Timeout:
             logger.debug(f"Validation request timed out for {platform}")
-            return {"valid": True, "checked_at": now_str, "reason": "timeout"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="timeout",
+                uncertain=True,
+            )
         except req_lib.exceptions.ConnectionError:
             logger.debug(f"Validation connection error for {platform}")
-            return {"valid": True, "checked_at": now_str, "reason": "connection_error"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="connection_error",
+                uncertain=True,
+            )
         except Exception as e:
             logger.debug(f"Validation request failed for {platform}: {e}")
-            return {"valid": True, "checked_at": now_str, "reason": "request_error"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="request_error",
+                uncertain=True,
+            )
 
         # Check the final URL after redirects
         final_url = resp.url.lower()
@@ -196,30 +239,34 @@ class SessionValidator:
                     f"Session EXPIRED for {platform}: "
                     f"redirected to {final_url} (matched '{indicator}')"
                 )
-                return {
-                    "valid": False,
-                    "checked_at": now_str,
-                    "reason": f"redirected_to_login",
-                }
+                return self._result(
+                    valid=False,
+                    checked_at=now_str,
+                    reason="redirected_to_login",
+                )
 
         # Additional check: some platforms return 401/403 instead of redirecting
         if resp.status_code in (401, 403):
             logger.info(f"Session EXPIRED for {platform}: got HTTP {resp.status_code}")
-            return {
-                "valid": False,
-                "checked_at": now_str,
-                "reason": f"http_{resp.status_code}",
-            }
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason=f"http_{resp.status_code}",
+            )
 
         logger.debug(f"Session VALID for {platform} (HTTP {resp.status_code}, url={final_url[:80]})")
-        return {"valid": True, "checked_at": now_str, "reason": "ok"}
+        return self._result(valid=True, checked_at=now_str, reason="ok")
 
     async def _validate_youtube_api_key(self) -> dict:
         """Validate YouTube API key by making a lightweight Data API call."""
         now_str = datetime.now(timezone.utc).isoformat()
 
         if not settings.YOUTUBE_API_KEY:
-            return {"valid": False, "checked_at": now_str, "reason": "no_api_key"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="no_api_key",
+            )
 
         # Check cache
         cached = self._cache.get("youtube")
@@ -228,13 +275,19 @@ class SessionValidator:
                 "valid": cached["valid"],
                 "checked_at": cached["checked_at"],
                 "reason": cached["reason"],
+                "uncertain": cached.get("uncertain", False),
             }
 
         try:
             result = await asyncio.to_thread(self._validate_youtube_sync)
         except Exception as e:
             logger.warning(f"YouTube API key validation error: {e}")
-            result = {"valid": True, "checked_at": now_str, "reason": "validation_error"}
+            result = self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="validation_error",
+                uncertain=True,
+            )
 
         self._cache["youtube"] = {**result, "_ts": time.time()}
         return result
@@ -250,14 +303,33 @@ class SessionValidator:
             )
             if resp.status_code == 200:
                 logger.debug("YouTube API key is valid")
-                return {"valid": True, "checked_at": now_str, "reason": "ok"}
+                return self._result(valid=True, checked_at=now_str, reason="ok")
             elif resp.status_code in (400, 403):
                 logger.info(f"YouTube API key invalid or quota exceeded: HTTP {resp.status_code}")
-                return {"valid": False, "checked_at": now_str, "reason": f"api_key_invalid_{resp.status_code}"}
+                return self._result(
+                    valid=False,
+                    checked_at=now_str,
+                    reason=f"api_key_invalid_{resp.status_code}",
+                )
             else:
-                return {"valid": True, "checked_at": now_str, "reason": "unknown_response"}
+                return self._result(
+                    valid=False,
+                    checked_at=now_str,
+                    reason="unknown_response",
+                    uncertain=True,
+                )
         except req_lib.exceptions.Timeout:
-            return {"valid": True, "checked_at": now_str, "reason": "timeout"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="timeout",
+                uncertain=True,
+            )
         except Exception as e:
             logger.debug(f"YouTube API key validation failed: {e}")
-            return {"valid": True, "checked_at": now_str, "reason": "request_error"}
+            return self._result(
+                valid=False,
+                checked_at=now_str,
+                reason="request_error",
+                uncertain=True,
+            )

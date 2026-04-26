@@ -1,33 +1,45 @@
 """
-Application Execution Root.
-Handles CLI parameter parsing and orchestrates control flow to various subsystems:
-  - ASGI API Gateway (`run_server`)
-  - Background Task Daemon (`run_cron`)
-  - CI/CD Artifact Compilation (`build_frontend`)
-  - Interactive Browser Authentication Shell (`run_login`)
+Application execution root.
+
+Handles CLI parameter parsing and orchestrates control flow to:
+- the ASGI API gateway (`run_server`)
+- the background task daemon (`run_cron`)
+- the frontend build pipeline (`build_frontend`)
+- the interactive browser authentication shell (`run_login`)
 """
 
 import argparse
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
-import signal
 
-# add project root to path
+# Add project root to path.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
+from backend.core.runtime import configure_runtime, validate_python_runtime
+
+configure_runtime()
+
 
 def main():
+    validate_python_runtime(raise_on_error=True)
+
     parser = argparse.ArgumentParser(
-        description="Unified Social Media Tool v2 — OSINT Intelligence Platform",
+        description="Unified Social Media Tool v2 - OSINT Intelligence Platform",
     )
     parser.add_argument("--cron", action="store_true", help="Run the cron scheduler")
     parser.add_argument("--build", action="store_true", help="Build the React frontend")
-    parser.add_argument("--login", type=str, metavar="PLATFORM", help="Open browser for manual login (facebook, instagram, twitter, youtube, telegram)")
-    parser.add_argument("--port", type=int, default=9000, help="API server port (default: 9000)")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="API server host (default: 0.0.0.0)")
+    parser.add_argument(
+        "--login",
+        type=str,
+        metavar="PLATFORM",
+        help="Open browser for manual login (facebook, instagram, twitter, youtube, telegram)",
+    )
+    parser.add_argument("--port", type=int, default=9000, help="API server port")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="API server host")
 
     args = parser.parse_args()
 
@@ -42,46 +54,44 @@ def main():
 
 
 def _free_port(port: int):
-    """Kill any stale process occupying the given port (Windows-only auto-cleanup)."""
+    """Check if the chosen port is already in use and warn; never force-kill."""
     if sys.platform != "win32":
         return
     try:
         result = subprocess.run(
             ["netstat", "-ano"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         for line in result.stdout.splitlines():
             if f":{port}" in line and "LISTENING" in line:
                 parts = line.split()
                 pid = int(parts[-1])
                 if pid == os.getpid():
-                    continue  # Don't kill ourselves
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True, timeout=5,
+                    continue
+                print(
+                    f"\nWARNING: Port {port} is already in use by PID {pid}.\n"
+                    f"Use --port <other> or stop that process manually.\n"
                 )
-                import time
-                time.sleep(1)
-                break
+                sys.exit(1)
     except Exception:
         pass
 
 
 def run_server(host: str, port: int):
-    """
-    Bootstraps the Uvicorn ASGI server and injects the FastAPI dependency graph.
-    """
+    """Boot the Uvicorn ASGI server."""
     import uvicorn
+
     from backend.core.logger import get_logger
 
     logger = get_logger("home")
-
-    # Auto-free the port if a stale process is holding it (common on Windows)
     _free_port(port)
 
     logger.info(f"Starting Unified Social Media Tool API on {host}:{port}")
 
-    print(f"""
+    print(
+        f"""
 +--------------------------------------------------+
 |     Unified Social Media Tool v2                 |
 |     OSINT Intelligence Platform                  |
@@ -90,60 +100,41 @@ def run_server(host: str, port: int):
 |  API Docs:    http://localhost:{port}/docs{' ' * max(0, 8 - len(str(port)))}|
 |  Health:      http://localhost:{port}/health{' ' * max(0, 6 - len(str(port)))}|
 +--------------------------------------------------+
-    """)
-
-    uvicorn.run(
-        "backend.api.router:app",
-        host=host,
-        port=port,
-        reload=False,
-        log_level="info",
-        access_log=False,
+"""
     )
+
+    try:
+        uvicorn.run(
+            "backend.api.router:app",
+            host=host,
+            port=port,
+            reload=False,
+            log_level="info",
+            access_log=False,
+        )
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
 
 
 def run_cron():
-    """
-    Initializes the APScheduler daemon.
-    Acquires and locks the main thread into an explicit asyncio event loop for background periodic tasks.
-    """
+    """Start the APScheduler daemon."""
     from backend.core.cron import CronScheduler
 
     print("Starting cron scheduler...")
     scheduler = CronScheduler()
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    # handle shutdown signals
-    def shutdown():
-        loop.stop()
-
     try:
-        if sys.platform != "win32":
-            loop.add_signal_handler(signal.SIGINT, shutdown)
-            loop.add_signal_handler(signal.SIGTERM, shutdown)
-    except NotImplementedError:
-        pass
-
-    try:
-        loop.run_until_complete(scheduler.run_forever())
+        asyncio.run(scheduler.run_forever())
     except KeyboardInterrupt:
         print("\nCron scheduler stopped.")
-    finally:
-        loop.close()
 
 
 def run_login(platform: str):
-    """
-    Orchestrates an un-managed, interactive Playwright browser shell.
-    Designed exclusively to capture and serialize volatile authentication tokens directly to the filesystem.
-    """
-    from backend.stealth.browser import create_visible_login_browser
+    """Open a visible Playwright browser for manual platform login."""
     from backend.api.routes.sessions import PLATFORM_LOGIN_CONFIG
+    from backend.stealth.browser import create_visible_login_browser
 
     platform = platform.lower()
-
     config = PLATFORM_LOGIN_CONFIG.get(platform)
     if config is None:
         print(f"Unknown platform: {platform}. Choices: {', '.join(PLATFORM_LOGIN_CONFIG.keys())}")
@@ -173,9 +164,9 @@ def run_login(platform: str):
             )
         )
         if success:
-            print(f"\n✅ {platform.title()} session saved successfully!")
+            print(f"\n{platform.title()} session saved successfully!")
         else:
-            print(f"\n❌ Login timed out for {platform.title()}")
+            print(f"\nLogin timed out for {platform.title()}")
     except KeyboardInterrupt:
         print("\nLogin cancelled.")
     finally:
@@ -183,29 +174,39 @@ def run_login(platform: str):
 
 
 def build_frontend():
-    """
-    CI/CD pipeline hook. 
-    Triggers Node.js sub-processes to compile the Vite React SPA bundle for static mounting.
-    """
+    """Install frontend dependencies and compile the Vite React app."""
     frontend_dir = os.path.join(PROJECT_ROOT, "frontend")
 
     if not os.path.exists(os.path.join(frontend_dir, "package.json")):
         print("Frontend package.json not found!")
         return
 
-    print("Installing frontend dependencies...")
-    result = subprocess.run(["npm", "install"], cwd=frontend_dir, shell=True)
+    npm_exe = shutil.which("npm.cmd") or shutil.which("npm")
+    if npm_exe is None:
+        print("npm was not found. Install Node.js LTS, then reopen PowerShell and retry.")
+        return
+
+    npm_cache_dir = os.path.join(PROJECT_ROOT, ".npm-cache")
+    os.makedirs(npm_cache_dir, exist_ok=True)
+    npm_env = os.environ.copy()
+    npm_env["npm_config_cache"] = npm_cache_dir
+
+    package_lock = os.path.join(frontend_dir, "package-lock.json")
+    install_cmd = [npm_exe, "ci"] if os.path.exists(package_lock) else [npm_exe, "install"]
+
+    print(f"Installing frontend dependencies with npm {install_cmd[1]}...")
+    result = subprocess.run(install_cmd, cwd=frontend_dir, env=npm_env)
     if result.returncode != 0:
-        print("npm install failed!")
+        print(f"npm {install_cmd[1]} failed!")
         return
 
     print("Building frontend...")
-    result = subprocess.run(["npm", "run", "build"], cwd=frontend_dir, shell=True)
+    result = subprocess.run([npm_exe, "run", "build"], cwd=frontend_dir, env=npm_env)
     if result.returncode != 0:
         print("Build failed!")
         return
 
-    print("\n✅ Frontend built successfully!")
+    print("\nFrontend built successfully!")
     print("Run 'python home.py' to start the server with the built frontend.")
 
 

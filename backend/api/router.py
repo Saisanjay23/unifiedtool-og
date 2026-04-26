@@ -5,21 +5,26 @@ and global exception shielding to prevent stacktrace propagation.
 """
 
 import os
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from collections import defaultdict
-import time
-
 from backend.core.config import settings
 from backend.core.db import init_indexes
 from backend.core.health import HealthManager
 from backend.core.logger import get_logger
+from backend.core.runtime import (
+    configure_runtime,
+    get_runtime_info,
+    validate_python_runtime,
+)
 
 logger = get_logger("api.router")
+configure_runtime()
 
 
 @asynccontextmanager
@@ -31,7 +36,18 @@ async def lifespan(app: FastAPI):
     """
     # startup
     logger.info("Unified Social Media Tool API starting up...")
+    validate_python_runtime(raise_on_error=True)
     settings.ensure_directories()
+
+    runtime_info = get_runtime_info()
+    for warning in runtime_info["warnings"]:
+        logger.warning(warning)
+
+    if runtime_info["configured_workers"] > 1:
+        raise RuntimeError(
+            "Configured worker count is greater than 1. "
+            "Run this tool with a single worker because live job state is kept in memory."
+        )
 
     # initialize MongoDB indexes
     try:
@@ -50,7 +66,10 @@ async def lifespan(app: FastAPI):
 
     def _quiet_exception_handler(loop, context):
         exc = context.get("exception")
-        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError)):
+        if isinstance(
+            exc,
+            (asyncio.CancelledError, ConnectionResetError, ConnectionAbortedError),
+        ):
             return  # silently ignore
         if _default_handler:
             _default_handler(loop, context)
@@ -152,12 +171,12 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     # register API routes
-    from backend.api.routes.health import router as health_router
     from backend.api.routes.clients import router as clients_router
-    from backend.api.routes.sessions import router as sessions_router
+    from backend.api.routes.health import router as health_router
     from backend.api.routes.jobs import router as jobs_router
-    from backend.api.routes.results import router as results_router
     from backend.api.routes.presets import router as presets_router
+    from backend.api.routes.results import router as results_router
+    from backend.api.routes.sessions import router as sessions_router
 
     app.include_router(health_router)
     app.include_router(clients_router)
@@ -189,6 +208,7 @@ def create_app() -> FastAPI:
                 "status": "API running",
                 "frontend": "not built — run 'python home.py --build'",
                 "docs": "/docs",
+                "runtime": get_runtime_info(),
             }
 
     # Fallback Catch-All Shield: Prevents arbitrary exceptions from leaking architectural structure to clients

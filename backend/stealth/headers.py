@@ -5,7 +5,6 @@ Used primarily for API-based scraping (Instagram, YouTube).
 """
 
 import random
-from typing import Optional
 
 from backend.core.logger import get_logger
 

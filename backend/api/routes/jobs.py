@@ -4,19 +4,19 @@ Handles creating, monitoring, and cancelling scraping jobs.
 """
 
 import asyncio
-from typing import Optional
+import random
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.core.config import settings
-from backend.core.jobs import JobManager
 from backend.core.health import HealthManager
-from backend.core.db import save_result
+from backend.core.jobs import JobManager
 from backend.core.logger import get_logger
 
 router = APIRouter(tags=["jobs"])
 logger = get_logger("api.jobs")
+OFFICIAL_API_ANALYSIS_PLATFORMS = {"youtube", "telegram"}
 
 
 class CreateJobRequest(BaseModel):
@@ -108,6 +108,7 @@ async def cancel_job(job_id: str):
 
 
 import base64
+
 
 async def _ensure_profile_image_b64(result_obj):
     """
@@ -226,17 +227,19 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
         if analyzer is None:
             return None
 
-        sem = asyncio.Semaphore(settings.MAX_CONCURRENT_PROFILES)
-
         async def run_analysis(progress_callback, client, keywords, headless=True, **kwargs):
-            # for analysis, "keywords" are actually URLs
-            urls = keywords
-            total = len(urls)
-
             from urllib.parse import urlparse
 
-            for i, url in enumerate(urls):
-                # SSRF Protection: strictly validate URL scheme and block local/internal IP ranges
+            from backend.stealth.browser_pool import BrowserPool
+
+            urls = keywords
+            completed = 0
+            progress_lock = asyncio.Lock()
+            is_official_api_platform = platform in OFFICIAL_API_ANALYSIS_PLATFORMS
+
+            # Validate all URLs first (SSRF protection)
+            valid_urls = []
+            for url in urls:
                 parsed = urlparse(url)
                 if parsed.scheme not in ("http", "https") or parsed.scheme == "file":
                     logger.warning(f"SSRF attempt blocked. Invalid URL scheme: {url}")
@@ -244,53 +247,113 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
                 if parsed.hostname in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
                     logger.warning(f"SSRF attempt blocked. Localhost targeted: {url}")
                     continue
+                valid_urls.append(url)
 
-                await progress_callback(
-                    event_type="progress",
-                    message=f"Analyzing {i + 1}/{total}: {url}",
-                    count_found=i,
-                    count_total=total,
-                )
+            if not valid_urls:
+                return
 
-                try:
-                    result = await asyncio.wait_for(
-                        analyzer.analyze(
-                            url=url,
-                            client=client,
-                            headless=headless,
-                            semaphore=sem,
-                        ),
-                        timeout=settings.REQUEST_TIMEOUT_SEC
-                        * 5,  # Allow max ~2.5 mins per profile
-                    )
-                    # DO NOT save to DB in Analysis mode. Emitted only to WebSocket.
-                    
-                    # Ensure base64 profile image is present before emitting
-                    await _ensure_profile_image_b64(result)
+            total = len(valid_urls)
+            parallelism = (
+                settings.ANALYSIS_API_CONCURRENT_TABS
+                if is_official_api_platform
+                else settings.ANALYSIS_CONCURRENT_TABS
+            )
+            parallelism = max(1, int(parallelism))
+            parallelism = min(parallelism, total)
+            inter_batch_delay = (
+                settings.ANALYSIS_API_INTER_PROFILE_DELAY
+                if is_official_api_platform
+                else settings.ANALYSIS_INTER_PROFILE_DELAY
+            )
 
-                    await progress_callback(
-                        event_type="result_found",
-                        message=f"Analyzed: {result.display_name or url}",
-                        count_found=i + 1,
-                        count_total=total,
-                        result=result.to_dict(),
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(f"Analysis timed out for {url}")
-                    await progress_callback(
-                        event_type="progress",
-                        message=f"Timed out analyzing {url}",
-                        count_found=i,
-                        count_total=total,
-                    )
-                except Exception as e:
-                    logger.error(f"Analysis failed for {url}: {e}")
-                    await progress_callback(
-                        event_type="progress",
-                        message=f"Error analyzing {url}: {str(e)}",
-                        count_found=i,
-                        count_total=total,
-                    )
+            # Launch ONE browser with multiple tabs
+            pool = await BrowserPool.create(
+                platform=platform,
+                headless=headless,
+                max_pages=parallelism,
+            )
+
+            try:
+                # Process profiles in parallel batches
+                batch_size = parallelism
+
+                for batch_start in range(0, len(valid_urls), batch_size):
+                    batch_urls = valid_urls[batch_start:batch_start + batch_size]
+
+                    async def analyze_one(url, idx):
+                        nonlocal completed
+                        page = await pool.acquire_page()
+                        try:
+                            async with progress_lock:
+                                await progress_callback(
+                                    event_type="progress",
+                                    message=f"Analyzing {idx + 1}/{total}: {url}",
+                                    count_found=completed,
+                                    count_total=total,
+                                )
+
+                            result = await asyncio.wait_for(
+                                analyzer.analyze_with_page(
+                                    url=url,
+                                    client=client,
+                                    page=page,
+                                ),
+                                timeout=settings.REQUEST_TIMEOUT_SEC * 3,
+                            )
+
+                            await _ensure_profile_image_b64(result)
+                            async with progress_lock:
+                                completed += 1
+                                current_completed = completed
+                                await progress_callback(
+                                    event_type="result_found",
+                                    message=f"Analyzed: {result.display_name or url}",
+                                    count_found=current_completed,
+                                    count_total=total,
+                                    result=result.to_dict(),
+                                )
+                        except asyncio.TimeoutError:
+                            logger.error(f"Analysis timed out for {url}")
+                            async with progress_lock:
+                                await progress_callback(
+                                    event_type="progress",
+                                    message=f"Timed out analyzing {url}",
+                                    count_found=completed,
+                                    count_total=total,
+                                )
+                        except Exception as e:
+                            logger.error(f"Analysis failed for {url}: {e}")
+                            async with progress_lock:
+                                await progress_callback(
+                                    event_type="progress",
+                                    message=f"Error analyzing {url}: {str(e)}",
+                                    count_found=completed,
+                                    count_total=total,
+                                )
+                        finally:
+                            await pool.release_page(page)
+
+                    # Run batch concurrently
+                    tasks = [
+                        analyze_one(url, batch_start + j)
+                        for j, url in enumerate(batch_urls)
+                    ]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # Anti-ban: small delay between batches
+                    if batch_start + batch_size < len(valid_urls):
+                        if inter_batch_delay > 0:
+                            delay = inter_batch_delay + random.uniform(0.5, 1.5)
+                            await asyncio.sleep(delay)
+
+            finally:
+                await pool.shutdown()
+                close_method = getattr(analyzer, "close", None)
+                if callable(close_method):
+                    try:
+                        await close_method()
+                    except Exception as exc:
+                        logger.warning(f"Failed to close analyzer for {platform}: {exc}")
 
         return run_analysis
 

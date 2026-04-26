@@ -1,175 +1,117 @@
-# Setup Guide: Running the OSINT Platform on a New Laptop
+# Setup Guide
 
-Complete step-by-step guide to get the Unified Social Media Tool running from scratch.
+This guide brings a new laptop from zero to a working local copy of the Unified Social Media Tool.
 
----
+## 1. Install Prerequisites
 
-## Step 1: Install Prerequisites
+Install:
 
-Install these **3 things** on the new laptop:
+| Software | Version |
+| --- | --- |
+| Python | 3.10 to 3.14, with 3.11 recommended |
+| Node.js | 18+ LTS |
+| MongoDB | Community 7+ or MongoDB Atlas |
 
-| Software | Version | Download Link |
-|----------|---------|---------------|
-| **Python** | 3.10+ | https://www.python.org/downloads/ |
-| **Node.js** | 18+ (LTS) | https://nodejs.org/ |
-| **MongoDB** | Community 7+ | https://www.mongodb.com/try/download/community |
+On Windows, enable "Add Python to PATH" during Python installation.
 
-> **Python Installer Tip**: Check ✅ "Add Python to PATH" during installation.
+## 2. Configure Environment
 
-> **MongoDB Alternative**: You can use MongoDB Atlas (cloud) instead of installing locally. Get a free cluster at https://www.mongodb.com/atlas
-
----
-
-## Step 2: Copy the Project
-
-Copy the entire `unifiedtool-og` folder to the new laptop (USB, zip, Google Drive, etc).
-
----
-
-## Step 3: Configure Environment
-
-1. Open the project folder in File Explorer
-2. Find `.env.example` → **make a copy** and rename it to `.env`
-3. Open `.env` in any text editor and fill in:
+Create `.env` from `.env.example`, then fill in the values you use:
 
 ```env
-# Required — MongoDB connection
 MONGO_URI=mongodb://localhost:27017
-
-# Optional — only if you use YouTube scraping
-YOUTUBE_API_KEY=your_key_here
-
-# Optional — only if you use Telegram scraping
-TELEGRAM_API_ID=your_id
-TELEGRAM_API_HASH=your_hash
-TELEGRAM_PHONE=+91xxxxxxxxxx
+YOUTUBE_API_KEY=
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+TELEGRAM_PHONE=
 ```
 
-> If using MongoDB Atlas, replace `MONGO_URI` with your Atlas connection string.
+If you use MongoDB Atlas, set `MONGO_URI` to your Atlas connection string.
 
----
+## 3. Install Backend Dependencies
 
-## Step 4: Install Backend (Python)
+Open PowerShell inside the project folder:
 
-Open **Terminal / Command Prompt** inside the project folder and run these commands **one by one**:
-
-```bash
-# 1. Create a virtual environment
+```powershell
 python -m venv venv
-
-# 2. Activate it
-# Windows:
 venv\Scripts\activate
-# Mac/Linux:
-source venv/bin/activate
-
-# 3. Install all Python packages
 pip install -r requirements.txt
-
-# 4. Install Playwright browser (downloads Chromium ~150MB)
 playwright install chromium
 ```
 
----
+## 4. Build the Frontend
 
-## Step 5: Install & Build Frontend (React)
-
-```bash
-# 1. Build the frontend (installs npm packages + compiles React app)
+```powershell
 python home.py --build
 ```
 
-This does `npm install` + `npm run build` automatically.
+This installs frontend dependencies and builds the React app into `frontend/dist`.
 
----
+## 5. Start the Application
 
-## Step 6: Start the Application
-
-```bash
+```powershell
 python home.py
 ```
 
-The app will start at: **http://localhost:9000**
+Open:
 
-You should see:
-```
-+--------------------------------------------------+
-|     Unified Social Media Tool v2                 |
-|     OSINT Intelligence Platform                  |
-+--------------------------------------------------+
-|  API Server:  http://localhost:9000              |
-|  API Docs:    http://localhost:9000/docs         |
-|  Health:      http://localhost:9000/health       |
-+--------------------------------------------------+
+```text
+http://localhost:9000
 ```
 
-Open **http://localhost:9000** in your browser.
+Useful endpoints:
 
----
+```text
+http://localhost:9000/docs
+http://localhost:9000/health
+```
 
-## Step 7: Login to Platforms (First-Time Only)
+## 6. Login to Browser-Based Platforms
 
-Scrapers need valid sessions to work. Log in to each platform you plan to use:
+Use the UI session panel or command line:
 
-### Option A: From the Web UI
-1. Open http://localhost:9000
-2. Select a platform (e.g., Instagram) from the sidebar
-3. Click **"Interactive Login"** in the Session panel
-4. A browser window opens → log in manually
-5. Session is saved automatically when login is detected
-
-### Option B: From Command Line
-```bash
+```powershell
 python home.py --login instagram
 python home.py --login facebook
 python home.py --login twitter
 ```
 
-Each command opens a browser → log in manually → session saves on success.
+YouTube and Telegram use API credentials from `.env` instead of browser login.
 
-> **Instagram**: After logging in, if you see "We suspect automated behavior", the tool will automatically dismiss it.
-
-> **YouTube & Telegram** use API keys instead of browser login. Set them in `.env`.
-
----
-
-## Quick Reference — All Commands
+## Common Commands
 
 | Command | Description |
-|---------|-------------|
-| `python home.py` | Start the server (main command) |
-| `python home.py --build` | Build/rebuild the frontend |
-| `python home.py --login instagram` | Login to Instagram interactively |
-| `python home.py --login facebook` | Login to Facebook interactively |
-| `python home.py --login twitter` | Login to Twitter/X interactively |
-| `python home.py --cron` | Start the cron scheduler (background jobs) |
+| --- | --- |
+| `python home.py` | Start the server |
+| `python home.py --build` | Build or rebuild the frontend |
+| `python home.py --login instagram` | Open interactive Instagram login |
+| `python home.py --login facebook` | Open interactive Facebook login |
+| `python home.py --login twitter` | Open interactive Twitter/X login |
+| `python home.py --cron` | Start the cron scheduler |
 | `python home.py --port 8080` | Start on a custom port |
-
----
 
 ## Troubleshooting
 
 | Problem | Fix |
-|---------|-----|
-| `python` not found | Use `python3` instead, or reinstall Python with "Add to PATH" checked |
-| `npm` not found | Reinstall Node.js |
-| MongoDB connection error | Make sure MongoDB is running: `mongod` or check Atlas IP whitelist |
-| `playwright install` fails | Run as admin: `pip install playwright && playwright install chromium` |
-| Instagram/Facebook blocked | Re-login: `python home.py --login instagram` |
-| Port 9000 already in use | Use a different port: `python home.py --port 8080` |
-| Frontend not loading | Rebuild: `python home.py --build` |
+| --- | --- |
+| `python` not found | Reinstall Python with PATH enabled, or use the Python launcher. |
+| `npm` not found | Install Node.js LTS and reopen PowerShell. |
+| MongoDB connection error | Start local MongoDB or check Atlas IP access. |
+| Playwright browser missing | Run `playwright install chromium`. |
+| Frontend not loading | Run `python home.py --build`. |
+| Port already in use | Run `python home.py --port 8080`. |
+| Session says logged out | Re-run interactive login for that platform. |
 
----
+## Folders to Keep Private
 
-## Folder Structure (What NOT to Delete)
+Do not share or commit:
 
+```text
+.env
+sessions/
+logs/
+exports/
+*.session
 ```
-unifiedtool-og/
-├── .env                  ← Your config (DO NOT share — has API keys)
-├── sessions/             ← Saved login sessions (DO NOT delete)
-├── backend/              ← Python backend
-├── frontend/             ← React frontend
-├── home.py               ← Main entry point
-├── requirements.txt      ← Python dependencies
-└── SETUP.md              ← This file
-```
+
+These contain credentials, login state, or runtime output.

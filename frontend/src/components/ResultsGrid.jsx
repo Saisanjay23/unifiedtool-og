@@ -380,7 +380,7 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
                 platform: activePlatform,
                 status: activeTab,
             });
-            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
             const a = document.createElement('a');
             a.href = url;
             a.download = `${selectedClient}_${activePlatform}_results.xlsx`;
@@ -388,6 +388,7 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
             window.URL.revokeObjectURL(url);
         } catch (err) {
             console.error('Export failed:', err);
+            alert(`Export failed: ${err.message}`);
         }
     };
 

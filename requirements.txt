@@ -1,18 +1,20 @@
 # Unified Social Media Tool v2 — Python Dependencies
+# Recommended runtime: Python 3.11
+# Supported runtime range: Python >=3.10,<3.15
 
 # Core web framework
 fastapi==0.115.6
 uvicorn==0.34.0
 pydantic-settings==2.7.0
-pydantic>=2.0.0
+pydantic==2.10.4
 
 # Async MongoDB driver
 motor==3.6.0
-pymongo>=4.0.0
+pymongo==4.10.1
 
 # Browser automation
-playwright>=1.49.0
-playwright-stealth>=1.0.6
+playwright==1.49.1
+playwright-stealth==1.0.6
 
 # Telegram API
 Telethon==1.38.1
@@ -22,19 +24,19 @@ google-api-python-client==2.163.0
 
 # HTTP libraries
 requests==2.32.3
-aiohttp>=3.9.5
+aiohttp==3.11.10
 
 # Scheduling
 APScheduler==3.10.4
 
 # Utilities
-tenacity>=8.3.0
+tenacity==9.0.0
 pycountry==24.6.1
-python-dateutil>=2.8.0
+python-dateutil==2.9.0.post0
 
 # Data export
 pandas==2.2.3
 openpyxl==3.1.5
 
 # WebSockets for FastAPI
-websockets>=11.0.3
+websockets==14.1

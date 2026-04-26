@@ -6,15 +6,10 @@ and metadata without triggering rate-limiting node expansions.
 """
 import asyncio
 import random
-import time
 from urllib.parse import quote
-from typing import Optional, List
 
-from backend.core.config import Settings
 from backend.core.db import ProfileResult
-from backend.core.health import HealthManager
 from backend.core.logger import get_logger
-from backend.stealth.human import HumanBehavior
 from backend.platforms.base import AbstractDiscoverer
 
 logger = get_logger("platforms.twitter.discovery")
@@ -145,8 +140,8 @@ class TwitterDiscoverer(AbstractDiscoverer):
                                         for entry in inst.get("entries", []):
                                             item_res = entry.get("content", {}).get("itemContent", {}).get("user_results", {}).get("result", {})
                                             if item_res:
-                                                core = item_res.get("core", {})
-                                                handle = core.get("screen_name", "") or item_res.get("legacy", {}).get("screen_name", "")
+                                                legacy = item_res.get("legacy", {})
+                                                handle = legacy.get("screen_name", "")
                                                 if handle:
                                                     user_cache[handle.lower()] = item_res
                                                     
@@ -158,8 +153,8 @@ class TwitterDiscoverer(AbstractDiscoverer):
                                     user_res = data["user"].get("result", {})
                                 
                                 if user_res:
-                                    core = user_res.get("core", {})
-                                    handle = core.get("screen_name", "") or user_res.get("legacy", {}).get("screen_name", "")
+                                    legacy = user_res.get("legacy", {})
+                                    handle = legacy.get("screen_name", "")
                                     if handle:
                                         user_cache[handle.lower()] = user_res
                         except Exception:
@@ -172,6 +167,31 @@ class TwitterDiscoverer(AbstractDiscoverer):
         try:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(random.uniform(5, 8))
+
+            # Detect and recover from "Something went wrong" error page
+            for retry in range(3):
+                body_text = ""
+                try:
+                    body_text = await page.evaluate("() => (document.body?.innerText || '').substring(0, 300)")
+                except Exception:
+                    pass
+
+                if "something went wrong" in body_text.lower():
+                    logger.warning(f"Twitter showed 'Something went wrong' (attempt {retry+1}/3), retrying...")
+                    # Try clicking the "Try again" button
+                    try:
+                        try_again = page.locator('text="Try again"').first
+                        if await try_again.is_visible(timeout=3000):
+                            await try_again.click()
+                            await asyncio.sleep(5)
+                            continue
+                    except Exception:
+                        pass
+                    # If no button, do a full reload
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(random.uniform(5, 8))
+                else:
+                    break  # Page loaded successfully
 
             if "/login" in page.url or "/i/flow/login" in page.url:
                 logger.error("Redirected to login page during search.")
@@ -193,6 +213,22 @@ class TwitterDiscoverer(AbstractDiscoverer):
             if len(cells) == 0:
                 if await page.locator('text="No results for"').is_visible():
                     break
+
+                # Check for "Something went wrong" mid-scrape
+                try:
+                    body_text = await page.evaluate("() => (document.body?.innerText || '').substring(0, 300)")
+                    if "something went wrong" in body_text.lower():
+                        logger.warning("Twitter 'Something went wrong' mid-scrape, clicking Try again...")
+                        try:
+                            try_again = page.locator('text="Try again"').first
+                            if await try_again.is_visible(timeout=2000):
+                                await try_again.click()
+                                await asyncio.sleep(5)
+                                continue
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
                 await asyncio.sleep(2)
                 no_change_count += 1
@@ -227,24 +263,28 @@ class TwitterDiscoverer(AbstractDiscoverer):
                         elif any(w in bio_lower for w in kw_words if len(w) > 2):
                             confidence = "MEDIUM"
 
-                    # Get HD version
+                    # Get HD version & enrich from GraphQL cache
                     hd_img_url = res.get("img_src", "")
+                    cached_result = user_cache.get(res.get("handle", "").lower(), {})
+                    cached_legacy = cached_result.get("legacy", {}) if cached_result else {}
                     
                     # Fallback to cache if missing from DOM
-                    if not hd_img_url and res.get("handle"):
-                        cached_result = user_cache.get(res["handle"].lower(), {})
-                        if cached_result:
-                            # Try avatar object
-                            avatar = cached_result.get("avatar", {})
-                            if avatar and "image_url" in avatar:
-                                hd_img_url = avatar["image_url"]
-                            else:
-                                # Try legacy object
-                                hd_img_url = cached_result.get("legacy", {}).get("profile_image_url_https", "")
+                    if not hd_img_url and cached_legacy:
+                        hd_img_url = cached_legacy.get("profile_image_url_https", "")
                             
                     if hd_img_url:
                          import re
                          hd_img_url = re.sub(r"_(normal|mini|bigger)\.", "_400x400.", hd_img_url)
+
+                    # Enrich followers from GraphQL cache (instead of hardcoded 0)
+                    followers_count = 0
+                    if cached_legacy:
+                        followers_count = cached_legacy.get("followers_count", 0) or 0
+
+                    # Enrich verified status from GraphQL cache
+                    is_verified = False
+                    if cached_legacy:
+                        is_verified = cached_legacy.get("verified", False) or cached_result.get("is_blue_verified", False)
 
                     profile_result = ProfileResult(
                         platform="twitter",
@@ -255,8 +295,8 @@ class TwitterDiscoverer(AbstractDiscoverer):
                         display_name=res["name"],
                         profile_image_url=hd_img_url,
                         bio=res["bio"],
-                        followers=0,
-                        is_verified=False,
+                        followers=followers_count,
+                        is_verified=is_verified,
                         confidence=confidence,
                     )
 
@@ -295,7 +335,7 @@ class TwitterDiscoverer(AbstractDiscoverer):
 
         return profiles
 
-    async def _extract_cell_data_legacy(self, cell, keyword) -> Optional[dict]:
+    async def _extract_cell_data_legacy(self, cell, keyword) -> dict | None:
         """
         Targeted Node Extraction.
         Evaluates a specific `UserCell` DOM fragment to extract handle, bio, and avatar.

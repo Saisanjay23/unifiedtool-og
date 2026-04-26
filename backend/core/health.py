@@ -4,11 +4,11 @@ Tracks request success/failure rates, selector reliability,
 and manages adaptive rate limiting with predictive pausing.
 """
 
-import time
 import asyncio
 import json
 import os
-from dataclasses import dataclass, field, asdict
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -84,7 +84,7 @@ class HealthManager:
             health.hour_window_start = now
 
     async def record_request(
-        self, platform: str, success: bool, status_code: Optional[int] = None
+        self, platform: str, success: bool, status_code: int | None = None
     ):
         """Record a single request outcome."""
         async with self._lock:

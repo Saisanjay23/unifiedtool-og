@@ -3,18 +3,17 @@ Client management API routes.
 Handles client CRUD and keyword preset management.
 """
 
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
 
 from backend.core.db import (
-    get_all_clients,
+    SUPPORTED_PLATFORMS,
     delete_client,
+    get_all_clients,
+    get_keyword_presets,
     save_client,
     save_keyword_preset,
-    get_keyword_presets,
-    get_collection,
-    SUPPORTED_PLATFORMS,
 )
 from backend.core.logger import get_logger
 

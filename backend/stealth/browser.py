@@ -6,32 +6,27 @@ fingerprint injection, stealth JS overrides, session state loading.
 
 import asyncio
 import os
-import sys
-from typing import Optional
 
 from playwright.async_api import (
-    async_playwright,
     Browser,
     BrowserContext,
     Page,
     Playwright,
+    async_playwright,
 )
 
 from backend.core.config import settings
+from backend.core.fs import atomic_write_json
 from backend.core.logger import get_logger
 from backend.stealth.fingerprint import (
     DeviceProfileManager,
-    get_canvas_noise_script,
-    get_webgl_spoof_script,
     get_audio_noise_script,
+    get_canvas_noise_script,
     get_navigator_override_script,
+    get_webgl_spoof_script,
 )
 
 logger = get_logger("stealth.browser")
-
-# event loop policy for Windows
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 
 # Chrome launch args tuned for stealth + rendering stability
@@ -53,7 +48,7 @@ STEALTH_ARGS = [
 async def create_stealth_browser(
     platform: str,
     headless: bool = True,
-    session_file: Optional[str] = None,
+    session_file: str | None = None,
 ) -> tuple[Playwright, Browser, BrowserContext, Page]:
     """
     Launch a fully stealth-patched Chromium browser.
@@ -119,12 +114,28 @@ async def create_stealth_browser(
     context = await browser.new_context(**context_opts)
 
     # apply stealth JS patches to every new page
+    # IMPORTANT: Twitter and Facebook detect canvas/WebGL/audio prototype overrides
+    # as "privacy extension" behavior and break ("Something went wrong" on Twitter,
+    # infinite loading spinner on Facebook). Only apply navigator override for these.
+    # Instagram REMOVED from aggressive stealth — canvas/WebGL/audio prototype overrides
+    # break Instagram's React hydration, causing blank pages (body renders empty, 11KB screenshots).
+    # Same issue that was previously fixed for Twitter and Facebook.
+    AGGRESSIVE_STEALTH_PLATFORMS = {"tiktok", "youtube", "telegram"}
+
     stealth_scripts = [
-        get_navigator_override_script(profile),
-        get_canvas_noise_script(),
-        get_webgl_spoof_script(profile),
-        get_audio_noise_script(),
+        get_navigator_override_script(profile),  # Always apply (webdriver=false, etc.)
     ]
+
+    if platform in AGGRESSIVE_STEALTH_PLATFORMS:
+        stealth_scripts.extend([
+            get_canvas_noise_script(),
+            get_webgl_spoof_script(profile),
+            get_audio_noise_script(),
+        ])
+        logger.debug(f"{platform}: Full stealth fingerprint spoofing enabled")
+    else:
+        logger.debug(f"{platform}: Using minimal stealth (navigator only) to avoid detection")
+
     for script in stealth_scripts:
         await context.add_init_script(script)
 
@@ -211,37 +222,34 @@ async def create_stealth_browser(
         # API request, or it makes an unsigned request that fails, bypassing both
         # our network interception and the hydration loop!
         
-        logger.debug("tiktok: Anti-bot stealth scripts applied (acrawler NOT blocked intentionally to allow X-Bogus generation)")    # also try playwright-stealth if installed
-    try:
-        from playwright_stealth import stealth_async
+        logger.debug("tiktok: Anti-bot stealth scripts applied (acrawler NOT blocked intentionally to allow X-Bogus generation)")
 
+    # also try playwright-stealth if installed (skip for Twitter/Facebook — conflicts with their integrity checks)
+    if platform not in ("twitter", "facebook", "instagram"):
+        try:
+            from playwright_stealth import stealth_async
+
+            page = await context.new_page()
+            await stealth_async(page)
+            logger.debug(f"{platform}: playwright-stealth patches applied")
+        except ImportError:
+            page = await context.new_page()
+            logger.debug(
+                f"{platform}: playwright-stealth not installed, using custom patches only"
+            )
+    else:
         page = await context.new_page()
-        await stealth_async(page)
-        logger.debug(f"{platform}: playwright-stealth patches applied")
-    except ImportError:
-        page = await context.new_page()
-        logger.debug(
-            f"{platform}: playwright-stealth not installed, using custom patches only"
-        )
+        logger.debug(f"{platform}: Skipping playwright-stealth (causes detection on this platform)")
 
     # set default navigation timeout
     page.set_default_timeout(settings.REQUEST_TIMEOUT_SEC * 1000)
     page.set_default_navigation_timeout(settings.REQUEST_TIMEOUT_SEC * 1000)
 
-    # Aggressive memory optimization: Block heavy media in headless mode
-    # IMPORTANT: images and CSS must NOT be blocked — they are required
-    # for screenshots and profile picture capture during analysis
-    if headless:
-
-        async def block_resources(route):
-            resource_type = route.request.resource_type
-            if resource_type in ("media", "font"):
-                await route.abort()
-            else:
-                await route.continue_()
-
-        # Apply resource blocker to all routes
-        await page.route("**/*", block_resources)
+    # Resource blocking DISABLED globally.
+    # The catch-all route handler (page.route("**/*", ...)) was interfering with
+    # platform JS bundles, causing Twitter's "Something went wrong" error and
+    # Facebook's infinite loading spinner. The memory savings from blocking
+    # media/font resources are not worth the reliability cost.
 
     logger.info(
         f"{platform}: Browser ready (headless={headless}, "
@@ -260,10 +268,7 @@ async def save_session_state(context: BrowserContext, platform: str):
     session_path = os.path.join(settings.SESSION_PATH, f"{platform}.json")
 
     storage = await context.storage_state()
-    import json
-
-    with open(session_path, "w", encoding="utf-8") as f:
-        json.dump(storage, f, indent=2)
+    atomic_write_json(session_path, storage, indent=2)
 
     logger.info(f"{platform}: Session state saved to {session_path}")
     return session_path
@@ -272,7 +277,7 @@ async def save_session_state(context: BrowserContext, platform: str):
 async def create_visible_login_browser(
     platform: str,
     start_url: str,
-    verify_cookie: Optional[str] = None,
+    verify_cookie: str | None = None,
     timeout_seconds: int = 600,
 ) -> bool:
     """
@@ -302,9 +307,10 @@ async def create_visible_login_browser(
         )
 
         # poll for the verification cookie
-        start_time = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
         while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = loop.time() - start_time
             if elapsed > timeout_seconds:
                 logger.warning(f"{platform}: Login timeout after {timeout_seconds}s")
                 return False

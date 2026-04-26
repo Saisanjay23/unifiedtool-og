@@ -431,7 +431,7 @@ export default function AnalysisResultsGrid({ activePlatform, inMemoryResults, s
                 platform: activePlatform,
                 results: results,
             });
-            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
             const a = document.createElement('a');
             a.href = url;
             a.download = `${selectedClient}_${activePlatform}_profiles_with_screenshots.xlsx`;
@@ -439,6 +439,7 @@ export default function AnalysisResultsGrid({ activePlatform, inMemoryResults, s
             window.URL.revokeObjectURL(url);
         } catch (err) {
             console.error('Export failed:', err);
+            alert(`Export failed: ${err.message}`);
         }
     };
 
@@ -599,7 +600,7 @@ export default function AnalysisResultsGrid({ activePlatform, inMemoryResults, s
                                                     platform: activePlatform,
                                                     results: exportData,
                                                 });
-                                                const url = window.URL.createObjectURL(new Blob([res.data]));
+                                                const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
                                                 const a = document.createElement('a');
                                                 a.href = url;
                                                 a.download = `${selectedClient}_${activePlatform}_profiles_no_screenshots.xlsx`;
@@ -607,6 +608,7 @@ export default function AnalysisResultsGrid({ activePlatform, inMemoryResults, s
                                                 window.URL.revokeObjectURL(url);
                                             } catch (err) {
                                                 console.error('Export failed:', err);
+                                                alert(`Export failed: ${err.message}`);
                                             }
                                         }}
                                         onMouseEnter={(e) => e.target.style.background = 'var(--bg-hover)'}

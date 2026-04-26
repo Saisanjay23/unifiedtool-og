@@ -7,17 +7,15 @@ Reads job definitions from a JSON file and supports hot-reload.
 import asyncio
 import json
 import os
-import time
-from datetime import datetime, timezone
-from typing import Optional
+from contextlib import suppress
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from backend.core.config import settings
-from backend.core.logger import get_logger
-from backend.core.health import HealthManager
 from backend.core.db import save_result
+from backend.core.health import HealthManager
+from backend.core.logger import get_logger
 
 logger = get_logger("core.cron")
 
@@ -53,7 +51,7 @@ class CronScheduler:
             if mtime == self._last_modified:
                 return
 
-            with open(self._config_path, "r", encoding="utf-8") as f:
+            with open(self._config_path, encoding="utf-8") as f:
                 jobs_config = json.load(f)
 
             self._last_modified = mtime
@@ -185,9 +183,13 @@ class CronScheduler:
 
     async def _watch_config(self):
         """Periodically check if the config file has been modified and reload."""
-        while True:
-            await asyncio.sleep(30)
-            self._load_config()
+        try:
+            while True:
+                await asyncio.sleep(30)
+                self._load_config()
+        except asyncio.CancelledError:
+            logger.info("Cron config watcher stopped")
+            raise
 
     async def run_forever(self):
         """
@@ -202,8 +204,11 @@ class CronScheduler:
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
             watcher_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher_task
             self.scheduler.shutdown(wait=False)
             logger.info("Cron scheduler stopped")
+            raise
 
     def get_scheduled_jobs(self) -> list[dict]:
         """Return information about all registered cron jobs."""

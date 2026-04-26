@@ -8,9 +8,9 @@ Also provides JavaScript injection scripts for canvas, WebGL, and audio spoofing
 import json
 import os
 import random
-from typing import Optional
 
 from backend.core.config import settings
+from backend.core.fs import atomic_write_json
 from backend.core.logger import get_logger
 
 logger = get_logger("stealth.fingerprint")
@@ -138,7 +138,7 @@ class DeviceProfileManager:
 
     def __init__(self, platform: str):
         self.platform = platform
-        self._profile: Optional[dict] = None
+        self._profile: dict | None = None
         self._profile_path = os.path.join(
             settings.SESSION_PATH, f"{platform}_device.json"
         )
@@ -152,7 +152,7 @@ class DeviceProfileManager:
 
         if os.path.exists(self._profile_path):
             try:
-                with open(self._profile_path, "r", encoding="utf-8") as f:
+                with open(self._profile_path, encoding="utf-8") as f:
                     data = json.load(f)
                 if not isinstance(data, dict):
                     raise ValueError("Profile is not a dict")
@@ -175,8 +175,7 @@ class DeviceProfileManager:
         return self._profile
 
     def _save_profile(self):
-        with open(self._profile_path, "w", encoding="utf-8") as f:
-            json.dump(self._profile, f, indent=2)
+        atomic_write_json(self._profile_path, self._profile, indent=2)
 
     def get_viewport(self) -> dict:
         """Return viewport dimensions from the device profile."""

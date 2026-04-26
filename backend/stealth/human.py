@@ -10,7 +10,6 @@ import math
 import random
 import time
 from datetime import datetime
-from typing import Optional
 
 from backend.core.logger import get_logger
 
@@ -36,7 +35,7 @@ class HumanBehavior:
         "between_profiles": (4.0, 1.5),
     }
 
-    def __init__(self, platform: str, session_start: Optional[datetime] = None):
+    def __init__(self, platform: str, session_start: datetime | None = None):
         self.platform = platform
         self.session_start = session_start or datetime.now()
         self.actions_taken = 0
@@ -134,7 +133,7 @@ class HumanBehavior:
             return False
 
     async def human_scroll(
-        self, page, direction: str = "down", distance: Optional[int] = None
+        self, page, direction: str = "down", distance: int | None = None
     ):
         """
         Scroll with physics-based motion — multiple small chunks

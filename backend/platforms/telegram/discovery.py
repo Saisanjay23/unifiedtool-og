@@ -1,12 +1,8 @@
 import asyncio
 import base64
 import os
-from io import BytesIO
-from typing import Optional
 
-from backend.core.config import Settings
 from backend.core.db import ProfileResult
-from backend.core.health import HealthManager
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractDiscoverer
 
@@ -155,7 +151,7 @@ class TelegramDiscoverer(AbstractDiscoverer):
 
     async def _user_to_profile(
         self, tg_client, user, keyword: str, client_name: str
-    ) -> Optional[ProfileResult]:
+    ) -> ProfileResult | None:
         """Convert a Telethon User object to ProfileResult."""
         try:
             username = user.username or ""
@@ -199,7 +195,7 @@ class TelegramDiscoverer(AbstractDiscoverer):
 
     async def _chat_to_profile(
         self, tg_client, chat, keyword: str, client_name: str
-    ) -> Optional[ProfileResult]:
+    ) -> ProfileResult | None:
         """Convert a Telethon Chat/Channel object to ProfileResult."""
         try:
             username = getattr(chat, "username", "") or ""

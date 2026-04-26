@@ -6,12 +6,11 @@ disparate platforms interchangeably without tight coupling to their underlying D
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Callable, Coroutine, Optional
+from collections.abc import Callable, Coroutine
 
 from backend.core.config import Settings
 from backend.core.db import ProfileResult
 from backend.core.health import HealthManager
-from backend.stealth.human import HumanBehavior
 
 
 class AbstractDiscoverer(ABC):
@@ -80,7 +79,7 @@ class AbstractAnalyzer(ABC):
         url: str,
         client: str,
         headless: bool = True,
-        semaphore: Optional[asyncio.Semaphore] = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> ProfileResult:
         """
         Executes deep profile hydration.

@@ -4,9 +4,9 @@ Writes logs to both console and rotating log files in the logs/ directory.
 Each log entry is a JSON object with timestamp, level, module, and message.
 """
 
+import json
 import logging
 import logging.handlers
-import json
 import os
 from datetime import datetime, timezone
 

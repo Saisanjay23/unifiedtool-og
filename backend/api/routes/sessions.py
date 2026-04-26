@@ -4,13 +4,16 @@ Handles browser session login for each platform.
 """
 
 import asyncio
-import os
-from datetime import datetime, timezone
-
-from fastapi import APIRouter, HTTPException, Body
 import json
+import os
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
 
-from backend.core.config import settings
+from fastapi import APIRouter, Body, HTTPException
+
+from backend.core.config import ENV_FILE_PATH, settings
+from backend.core.fs import atomic_write_json, atomic_write_text
 from backend.core.health import HealthManager
 from backend.core.logger import get_logger
 from backend.core.session_validator import SessionValidator
@@ -48,6 +51,67 @@ PLATFORM_LOGIN_CONFIG = {
 
 # track active login sessions (in-progress login attempts)
 _active_logins: dict[str, dict] = {}
+_ENV_FILE_LOCK = threading.Lock()
+
+
+def _load_env_lines() -> list[str]:
+    env_file = Path(ENV_FILE_PATH)
+    if not env_file.exists():
+        return []
+    with env_file.open("r", encoding="utf-8") as handle:
+        return handle.readlines()
+
+
+def _write_env_lines(lines: list[str]) -> None:
+    atomic_write_text(ENV_FILE_PATH, "".join(lines))
+
+
+def _set_env_key(key: str, value: str) -> None:
+    """Upsert a key in the project .env file using an atomic replace."""
+    with _ENV_FILE_LOCK:
+        lines = _load_env_lines()
+        found = False
+        updated_lines: list[str] = []
+
+        for line in lines:
+            if line.startswith(f"{key}="):
+                updated_lines.append(f"{key}={value}\n")
+                found = True
+            else:
+                updated_lines.append(line)
+
+        if not found:
+            updated_lines.append(f"{key}={value}\n")
+
+        _write_env_lines(updated_lines)
+
+
+def _remove_env_key(key: str) -> None:
+    """Blank out a key in the project .env file so it won't persist across restarts."""
+    with _ENV_FILE_LOCK:
+        lines = _load_env_lines()
+        if not lines:
+            return
+
+        updated_lines = []
+        for line in lines:
+            if line.startswith(f"{key}="):
+                updated_lines.append(f"{key}=\n")
+            else:
+                updated_lines.append(line)
+
+        _write_env_lines(updated_lines)
+
+
+def _delete_file_if_exists(path: str) -> bool:
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning(f"Failed to delete {path}: {exc}")
+        return False
 
 
 @router.post("/sessions/{platform}/launch")
@@ -154,7 +218,7 @@ async def get_session_status(platform: str):
     session_file = os.path.join(settings.SESSION_PATH, f"{platform}.json")
     if os.path.exists(session_file):
         try:
-            with open(session_file, "r", encoding="utf-8") as f:
+            with open(session_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             required_cookie = PLATFORM_LOGIN_CONFIG[platform].get("verify_cookie")
@@ -196,26 +260,36 @@ async def get_session_status(platform: str):
 
     # Active session validation: verify session is still valid server-side
     session_expired = False
+    session_uncertain = False
     expired_reason = None
+    validation_warning = None
     validation_checked_at = None
 
     if logged_in and not login_progress.get("in_progress", False):
         validator = SessionValidator()
         validation = await validator.validate(platform)
         validation_checked_at = validation.get("checked_at")
-        if not validation["valid"]:
+        session_uncertain = validation.get("uncertain", False)
+        if session_uncertain:
+            validation_warning = validation.get("reason", "validation_error")
+            logger.warning(
+                f"Session validation uncertain for {platform}: {validation_warning}"
+            )
+        elif not validation["valid"]:
             session_expired = True
             expired_reason = validation.get("reason", "unknown")
             logger.info(f"Session expired for {platform}: {expired_reason}")
 
     return {
         "platform": platform,
-        "logged_in": logged_in and not session_expired,
+        "logged_in": logged_in and not session_expired and not session_uncertain,
         "last_login": last_login,
         "age_hours": age_hours,
         "login_in_progress": login_progress.get("in_progress", False),
         "session_expired": session_expired,
+        "session_uncertain": session_uncertain,
         "expired_reason": expired_reason,
+        "validation_warning": validation_warning,
         "last_validated": validation_checked_at,
     }
 
@@ -278,8 +352,7 @@ async def import_cookies(platform: str, cookies: list[dict] = Body(...)):
     # Ensure directory exists
     os.makedirs(os.path.dirname(session_file), exist_ok=True)
 
-    with open(session_file, "w", encoding="utf-8") as f:
-        json.dump(playwright_state, f, indent=2)
+    atomic_write_json(session_file, playwright_state, indent=2)
 
     # Clear health suspension since we have a new session
     HealthManager().clear_suspension(platform)
@@ -303,26 +376,29 @@ async def clear_session(platform: str):
 
     # Standard browser session file
     session_file = os.path.join(settings.SESSION_PATH, f"{platform}.json")
-    if os.path.exists(session_file):
-        os.remove(session_file)
+    if _delete_file_if_exists(session_file):
         cleared = True
 
     # Telegram uses Telethon .session file
     if platform == "telegram":
         tg_session = os.path.join(settings.SESSION_PATH, "telegram.session")
-        if os.path.exists(tg_session):
-            os.remove(tg_session)
+        if _delete_file_if_exists(tg_session):
             cleared = True
         # Also clear in-memory credentials so status shows Inactive
+        _remove_env_key("TELEGRAM_API_ID")
+        _remove_env_key("TELEGRAM_API_HASH")
+        _remove_env_key("TELEGRAM_PHONE")
         settings.TELEGRAM_API_ID = None
         settings.TELEGRAM_API_HASH = None
         settings.TELEGRAM_PHONE = None
         cleared = True  # Always succeed for Telegram (clearing keys counts)
 
-    # YouTube: also clear API key from memory
+    # YouTube: clear API key from BOTH memory and .env
     if platform == "youtube":
         if settings.YOUTUBE_API_KEY:
             cleared = True  # Had an API key to clear
+            # Remove from .env so it doesn't come back on restart
+            _remove_env_key("YOUTUBE_API_KEY")
         settings.YOUTUBE_API_KEY = None
 
     if cleared:
@@ -362,26 +438,6 @@ async def get_credentials(platform: str):
 @router.post("/sessions/{platform}/credentials")
 async def save_credentials(platform: str, payload: dict = Body(...)):
     """Save API credentials to the .env file and update the settings singleton in memory."""
-    env_file = ".env"
-
-    # helper to update .env
-    def set_env_key(key, value):
-        lines = []
-        if os.path.exists(env_file):
-            with open(env_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-        found = False
-        with open(env_file, "w", encoding="utf-8") as f:
-            for line in lines:
-                if line.startswith(f"{key}="):
-                    f.write(f"{key}={value}\n")
-                    found = True
-                else:
-                    f.write(line)
-            if not found:
-                f.write(f"{key}={value}\n")
-
     if platform == "youtube":
         api_key = payload.get("api_key")
         if not api_key:
@@ -389,7 +445,7 @@ async def save_credentials(platform: str, payload: dict = Body(...)):
 
         if api_key != "***":
             settings.YOUTUBE_API_KEY = api_key
-            set_env_key("YOUTUBE_API_KEY", api_key)
+            _set_env_key("YOUTUBE_API_KEY", api_key)
         # Invalidate validation cache so status updates immediately
         SessionValidator().invalidate("youtube")
         return {"status": "success", "message": "YouTube API Key saved."}
@@ -411,13 +467,13 @@ async def save_credentials(platform: str, payload: dict = Body(...)):
 
         if api_hash != "***":
             settings.TELEGRAM_API_HASH = api_hash
-            set_env_key("TELEGRAM_API_HASH", api_hash)
+            _set_env_key("TELEGRAM_API_HASH", api_hash)
 
         settings.TELEGRAM_PHONE = phone or ""
 
-        set_env_key("TELEGRAM_API_ID", str(api_id))
+        _set_env_key("TELEGRAM_API_ID", str(api_id))
         if phone:
-            set_env_key("TELEGRAM_PHONE", phone)
+            _set_env_key("TELEGRAM_PHONE", phone)
 
         return {"status": "success", "message": "Telegram credentials saved."}
 
@@ -478,11 +534,16 @@ async def telegram_send_code(payload: dict = Body(...)):
 
 @router.post("/sessions/telegram/auth/verify_code")
 async def telegram_verify_code(payload: dict = Body(...)):
-    phone = payload.get("phone")
+    phone = payload.get("phone", "").strip()
     code = payload.get("code")
 
     if not phone or not code:
         raise HTTPException(status_code=400, detail="Phone and code are required")
+
+    # Apply the SAME normalization as send_code so the lookup key matches
+    phone = phone.replace(" ", "").replace("-", "")
+    if not phone.startswith("+"):
+        phone = "+" + phone
 
     state = _telegram_auth_clients.get(phone)
     if not state:
@@ -513,11 +574,16 @@ async def telegram_verify_code(payload: dict = Body(...)):
 
 @router.post("/sessions/telegram/auth/verify_password")
 async def telegram_verify_password(payload: dict = Body(...)):
-    phone = payload.get("phone")
+    phone = payload.get("phone", "").strip()
     password = payload.get("password")
 
     if not phone or not password:
         raise HTTPException(status_code=400, detail="Phone and password are required")
+
+    # Apply the SAME normalization as send_code so the lookup key matches
+    phone = phone.replace(" ", "").replace("-", "")
+    if not phone.startswith("+"):
+        phone = "+" + phone
 
     state = _telegram_auth_clients.get(phone)
     if not state:

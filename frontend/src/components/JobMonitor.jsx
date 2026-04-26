@@ -31,6 +31,7 @@ export default function JobMonitor({ jobId, onClose, onResultFound }) {
     const wsRef = useRef(null);
     const startTimeRef = useRef(Date.now());
     const timerRef = useRef(null);
+    const seenSeqsRef = useRef(new Set());
     const updateJob = useStore((s) => s.updateJob);
 
     // Reset all state when jobId changes (fixes stuck progress on second run)
@@ -44,6 +45,7 @@ export default function JobMonitor({ jobId, onClose, onResultFound }) {
         setEta(null);
         setSpeed(0);
         startTimeRef.current = Date.now();
+        seenSeqsRef.current = new Set();
 
         // Restart the elapsed timer
         if (timerRef.current) clearInterval(timerRef.current);
@@ -81,6 +83,11 @@ export default function JobMonitor({ jobId, onClose, onResultFound }) {
         if (!jobId) return;
 
         const conn = connectJobWebSocket(jobId, (event) => {
+            if (typeof event.seq === 'number') {
+                if (seenSeqsRef.current.has(event.seq)) return;
+                seenSeqsRef.current.add(event.seq);
+            }
+
             setEvents((prev) => [...prev.slice(-100), event]);
 
             if (event.count_found !== undefined) {
@@ -99,10 +106,11 @@ export default function JobMonitor({ jobId, onClose, onResultFound }) {
                 setProgress(event.count_found / event.count_total);
             }
 
-            if (event.event_type === 'completed' || event.event_type === 'failed') {
+            if (event.event_type === 'completed' || event.event_type === 'failed' || event.event_type === 'cancelled') {
                 setStatus(event.event_type);
-                setProgress(event.event_type === 'completed' ? 1 : progress);
+                setProgress((prev) => (event.event_type === 'completed' ? 1 : prev));
                 updateJob(jobId, { status: event.event_type });
+                wsRef.current?.close();
             }
         });
 
@@ -281,7 +289,7 @@ export default function JobMonitor({ jobId, onClose, onResultFound }) {
                 )}
                 {events.map((event, i) => (
                     <div
-                        key={i}
+                        key={event.seq ?? i}
                         style={{
                             padding: '2px 0',
                             color: event.event_type === 'result_found'

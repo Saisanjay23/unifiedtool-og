@@ -9,13 +9,19 @@ import base64
 import datetime
 import os
 import re
-from typing import Optional
+
+from playwright.async_api import async_playwright
+from telethon import TelegramClient
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.users import GetFullUserRequest
 
 from backend.core.config import Settings
 from backend.core.db import ProfileResult
 from backend.core.health import HealthManager
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractAnalyzer
+from backend.platforms.utils import calculate_risk as _calculate_risk_shared
+from backend.stealth.browser import create_stealth_browser
 
 logger = get_logger("platforms.telegram.analysis")
 
@@ -23,118 +29,184 @@ logger = get_logger("platforms.telegram.analysis")
 class TelegramAnalyzer(AbstractAnalyzer):
     """Deep-analyzes Telegram users and channels with full OSINT field population."""
 
+    def __init__(self, config: Settings, health: HealthManager):
+        super().__init__(config, health)
+        self._client_lock = asyncio.Lock()
+        self._client: TelegramClient | None = None
+
+    async def _get_shared_client(self) -> TelegramClient:
+        """Reuse one connected Telethon client per analyzer/job for speed and stability."""
+        async with self._client_lock:
+            if self._client is not None and self._client.is_connected():
+                return self._client
+
+            if not self.config.TELEGRAM_API_ID or not self.config.TELEGRAM_API_HASH:
+                raise RuntimeError("Telegram API credentials not configured")
+
+            try:
+                api_id = int(self.config.TELEGRAM_API_ID)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Invalid API ID format") from exc
+
+            session_path = os.path.join(self.config.SESSION_PATH, "telegram")
+            client = TelegramClient(
+                session_path,
+                api_id,
+                self.config.TELEGRAM_API_HASH,
+            )
+            await client.connect()
+
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                raise RuntimeError("Session not authorized")
+
+            self._client = client
+            return client
+
+    async def close(self):
+        """Release the shared Telethon client once the job finishes."""
+        async with self._client_lock:
+            if self._client is not None:
+                try:
+                    await self._client.disconnect()
+                finally:
+                    self._client = None
+
     async def analyze(
         self,
         url: str,
         client: str,
         headless: bool = True,
-        semaphore: Optional[asyncio.Semaphore] = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> ProfileResult:
+        """Legacy single-profile analysis. Launches its own browser."""
         sem = semaphore or asyncio.Semaphore(1)
-
         async with sem:
-            error_comments = []
-            result = ProfileResult(
-                platform="telegram",
-                client_name=client,
-                keyword="",
-                url=url,
+            pw, browser, context, page = await create_stealth_browser(
+                platform="telegram", headless=headless,
             )
+            try:
+                return await self._do_analysis(page, url, client, browser_context=context)
+            finally:
+                if page and not page.is_closed():
+                    await page.close()
+                if browser:
+                    await browser.close()
+                if pw:
+                    await pw.stop()
+                await self.close()
 
-            if not self.config.TELEGRAM_API_ID or not self.config.TELEGRAM_API_HASH:
-                logger.warning("Telegram API credentials not configured")
-                result.comments = "API credentials not configured"
+    async def analyze_with_page(
+        self,
+        url: str,
+        client: str,
+        page,
+    ) -> ProfileResult:
+        """Pool-optimized analysis. Uses a pre-existing stealth page (tab)."""
+        return await self._do_analysis(page, url, client)
+
+    async def _do_analysis(
+        self,
+        page,
+        url: str,
+        client: str,
+        browser_context=None,
+    ) -> ProfileResult:
+        """Core analysis logic."""
+        # Note: 'page' is used for web preview screenshot.
+        
+        error_comments = []
+        result = ProfileResult(
+            platform="telegram",
+            client_name=client,
+            keyword="",
+            url=url,
+        )
+
+        if not self.config.TELEGRAM_API_ID or not self.config.TELEGRAM_API_HASH:
+            logger.warning("Telegram API credentials not configured")
+            result.comments = "API credentials not configured"
+            return result
+
+        try:
+            # Check if Telethon is available (already imported, but keeping structure)
+            import telethon
+        except ImportError:
+            logger.error("Telethon not installed")
+            result.comments = "Telethon not installed"
+            return result
+
+        try:
+            tg_client = await self._get_shared_client()
+
+            username = self._extract_username(url)
+            if not username:
+                logger.warning(f"Could not extract username from URL: {url}")
+                result.comments = "Invalid URL"
                 return result
 
-            try:
-                from telethon import TelegramClient
-                from telethon.tl.functions.users import GetFullUserRequest
-                from telethon.tl.functions.channels import GetFullChannelRequest
-                from telethon.tl.functions.messages import GetHistoryRequest
-            except ImportError:
-                logger.error("Telethon not installed")
-                result.comments = "Telethon not installed"
-                return result
+            entity = await tg_client.get_entity(username)
 
-            session_path = os.path.join(self.config.SESSION_PATH, "telegram")
-
-            try:
-                api_id = int(self.config.TELEGRAM_API_ID)
-            except (TypeError, ValueError):
-                logger.warning("Invalid TELEGRAM_API_ID format")
-                result.comments = "Invalid API ID format"
-                return result
-
-            tg_client = TelegramClient(
-                session_path,
-                api_id,
-                self.config.TELEGRAM_API_HASH,
-            )
-
-            try:
-                await tg_client.connect()
-
-                if not await tg_client.is_user_authorized():
-                    logger.warning("Telegram session not authorized")
-                    result.comments = "Session not authorized"
-                    return result
-
-                username = self._extract_username(url)
-                if not username:
-                    logger.warning(f"Could not extract username from URL: {url}")
-                    result.comments = "Invalid URL"
-                    return result
-
-                entity = await tg_client.get_entity(username)
-
-                if hasattr(entity, "broadcast") or hasattr(entity, "megagroup"):
-                    result = await self._analyze_channel(
-                        tg_client, entity, url, client, error_comments
-                    )
-                else:
-                    result = await self._analyze_user(
-                        tg_client, entity, url, client, error_comments
-                    )
-
-                # Download profile photo
-                photo_b64 = await self._download_photo(tg_client, entity)
-                if photo_b64:
-                    result.profile_image_b64 = photo_b64
-                    result.has_logo = True
-
-                # Capture screenshot of t.me web preview
-                web_username = username if isinstance(username, str) else None
-                if web_username:
-                    screenshot_b64 = await self._capture_screenshot(web_username, headless)
-                    if screenshot_b64:
-                        result.screenshot_b64 = screenshot_b64
-
-                # Get last message for Active/Last Post detection
-                await self._check_last_message(
-                    tg_client, entity, result, error_comments
+            if hasattr(entity, "broadcast") or hasattr(entity, "megagroup"):
+                result_task = self._analyze_channel(
+                    tg_client, entity, url, client, error_comments
+                )
+            else:
+                result_task = self._analyze_user(
+                    tg_client, entity, url, client, error_comments
                 )
 
-                # Calculate OSINT risk score
-                result.comments = ""
-                self._calculate_risk(result)
+            web_username = username if isinstance(username, str) else None
+            screenshot_task = (
+                self._capture_screenshot_with_page(page, web_username)
+                if web_username
+                else asyncio.sleep(0, result=None)
+            )
+            photo_task = self._download_photo(tg_client, entity)
+            last_message_task = self._get_last_message_info(
+                tg_client, entity, error_comments
+            )
 
-                await self.health.record_request("telegram", success=True)
+            result, photo_b64, screenshot_b64, last_message_info = await asyncio.gather(
+                result_task,
+                photo_task,
+                screenshot_task,
+                last_message_task,
+            )
 
-            except Exception as exc:
-                logger.error(f"Telegram analysis failed for {url}: {exc}")
-                result.comments = f"Critical error: {type(exc).__name__}"
-                await self.health.record_request("telegram", success=False)
-            finally:
-                await tg_client.disconnect()
+            if photo_b64:
+                result.profile_image_b64 = photo_b64
+                result.has_logo = True
 
-            return result
+            if screenshot_b64:
+                result.screenshot_b64 = screenshot_b64
+
+            if last_message_info:
+                result.last_post_date = last_message_info["last_post_date"]
+                result.last_active = last_message_info["last_active"]
+                result.is_active = last_message_info["is_active"]
+
+            # Calculate OSINT risk score
+            result.comments = ""
+            self._calculate_risk(result)
+
+            await self.health.record_request("telegram", success=True)
+
+        except RuntimeError as exc:
+            logger.warning(f"Telegram analysis unavailable for {url}: {exc}")
+            result.comments = str(exc)
+            await self.health.record_request("telegram", success=False)
+        except Exception as exc:
+            logger.error(f"Telegram analysis failed for {url}: {exc}")
+            result.comments = f"Critical error: {type(exc).__name__}"
+            await self.health.record_request("telegram", success=False)
+
+        return result
 
     async def _analyze_user(
         self, tg_client, user, url: str, client_name: str, error_comments: list
     ) -> ProfileResult:
         """Analyze a Telegram user for full profile data."""
-        from telethon.tl.functions.users import GetFullUserRequest
-
         try:
             full = await tg_client(GetFullUserRequest(user))
             full_user = full.full_user
@@ -172,8 +244,6 @@ class TelegramAnalyzer(AbstractAnalyzer):
         self, tg_client, channel, url: str, client_name: str, error_comments: list
     ) -> ProfileResult:
         """Analyze a Telegram channel/group for full details."""
-        from telethon.tl.functions.channels import GetFullChannelRequest
-
         try:
             full = await tg_client(GetFullChannelRequest(channel))
             full_chat = full.full_chat
@@ -212,24 +282,27 @@ class TelegramAnalyzer(AbstractAnalyzer):
                 has_name_match=True,
             )
 
-    async def _check_last_message(
-        self, tg_client, entity, result: ProfileResult, error_comments: list
-    ):
-        """Check last message date for Active/Last Post detection."""
+    async def _get_last_message_info(
+        self, tg_client, entity, error_comments: list
+    ) -> dict | None:
+        """Get last message metadata for Active/Last Post detection."""
         try:
             messages = await tg_client.get_messages(entity, limit=1)
             if messages and len(messages) > 0:
                 msg = messages[0]
                 if msg and msg.date:
-                    result.last_post_date = msg.date.strftime("%d-%m-%Y")
-                    result.last_active = msg.date.strftime("%d-%m-%Y")
+                    date_str = msg.date.strftime("%d-%m-%Y")
                     now = datetime.datetime.now(datetime.timezone.utc)
-                    if (now - msg.date).days <= 180:
-                        result.is_active = True
+                    return {
+                        "last_post_date": date_str,
+                        "last_active": date_str,
+                        "is_active": (now - msg.date).days <= 180,
+                    }
         except Exception as exc:
             error_comments.append(f"Last msg: {str(exc)[:20]}")
+        return None
 
-    async def _download_photo(self, tg_client, entity) -> Optional[str]:
+    async def _download_photo(self, tg_client, entity) -> str | None:
         """Download and base64-encode the entity's profile photo."""
         try:
             photo_bytes = await tg_client.download_profile_photo(entity, bytes)
@@ -239,19 +312,9 @@ class TelegramAnalyzer(AbstractAnalyzer):
             logger.debug(f"Photo download failed: {exc}")
         return None
 
-    async def _capture_screenshot(self, username: str, headless: bool = True) -> Optional[str]:
-        """Capture screenshot of the public t.me/<username> web preview using Playwright."""
-        pw = None
-        browser = None
+    async def _capture_screenshot_with_page(self, page, username: str) -> str | None:
+        """Capture screenshot of the public t.me/<username> web preview using the provided page."""
         try:
-            from playwright.async_api import async_playwright
-
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(headless=headless)
-            page = await browser.new_page(
-                viewport={"width": 1280, "height": 900}
-            )
-
             tme_url = f"https://t.me/{username}"
             await page.goto(tme_url, wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2)  # let the page render
@@ -264,70 +327,29 @@ class TelegramAnalyzer(AbstractAnalyzer):
                 return base64.b64encode(screenshot_bytes).decode("utf-8")
         except Exception as exc:
             logger.debug(f"Screenshot capture failed for @{username}: {exc}")
+        return None
+
+    async def _capture_screenshot(self, username: str, headless: bool = True) -> str | None:
+        """Legacy standalone screenshot capture."""
+        pw = None
+        browser = None
+        try:
+
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=headless)
+            page = await browser.new_page(
+                viewport={"width": 1280, "height": 900}
+            )
+            return await self._capture_screenshot_with_page(page, username)
         finally:
             if browser:
                 await browser.close()
             if pw:
                 await pw.stop()
-        return None
 
     def _calculate_risk(self, result: ProfileResult):
-        """Calculate risk score 3-9 using old tool's exact logic."""
-        has_name = result.has_name_match
-        has_logo = result.has_logo
-        has_location = bool(
-            result.location and result.location.lower() not in ("nan", "none", "")
-        )
-        followers = result.followers or 0
-        now = datetime.datetime.now()
-
-        def get_months_ago(date_str):
-            if not date_str or str(date_str).lower() in ("nan", "none", "", "no"):
-                return 999
-            try:
-                parts = str(date_str).split("-")
-                if len(parts) == 2:
-                    dt = datetime.datetime.strptime(date_str, "%m-%Y")
-                else:
-                    dt = datetime.datetime.strptime(date_str, "%d-%m-%Y")
-                return (now.year - dt.year) * 12 + (now.month - dt.month)
-            except Exception:
-                return 999
-
-        created_months = get_months_ago(result.created_at)
-        posted_months = get_months_ago(result.last_post_date)
-
-        is_new = created_months <= 6
-        is_very_new = created_months <= 1
-
-        result.is_active = result.is_active or is_new
-        result.priority = "High" if has_logo else "Low"
-
-        score = 0
-        if (
-            has_name
-            and has_logo
-            and is_new
-            and result.is_active
-            and has_location
-            and followers > 100
-        ):
-            score = 9
-        elif (
-            has_name and has_logo and result.is_active and has_location and is_very_new
-        ):
-            score = 8
-        elif has_name and has_logo and result.is_active and has_location:
-            score = 7
-        elif has_name and has_logo and (result.is_active or is_new):
-            score = 7
-        elif has_name and has_logo:
-            score = 6
-        elif has_name and is_new:
-            score = 4
-        elif has_name:
-            score = 3
-        result.risk_score = score
+        """Calculate risk score 3-9 — delegates to shared implementation."""
+        _calculate_risk_shared(result)
 
     def _extract_username(self, url: str):
         """Extract username (str) or entity ID (int) from t.me URL or raw input."""

@@ -24,9 +24,15 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
     logger.info(f"WebSocket connected for job {job_id}")
 
     manager = JobManager()
-    queue = manager.get_progress_queue(job_id)
+    after_seq_raw = websocket.query_params.get("after_seq", "0")
+    try:
+        after_seq = max(0, int(after_seq_raw))
+    except ValueError:
+        after_seq = 0
 
-    if queue is None:
+    subscription = await manager.subscribe(job_id, after_seq=after_seq)
+
+    if subscription is None:
         # job doesn't exist or already cleaned up
         await websocket.send_json(
             {
@@ -37,7 +43,23 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
         await websocket.close()
         return
 
+    history, queue = subscription
+
     try:
+        for event in history:
+            await websocket.send_json(event.to_dict())
+
+        if history and history[-1].event_type in ("completed", "failed", "cancelled"):
+            logger.info(f"WebSocket replay complete for terminal job {job_id}")
+            await manager.unsubscribe(job_id, queue)
+            queue = None
+            try:
+                while True:
+                    await websocket.receive_text()
+            except WebSocketDisconnect:
+                logger.info(f"WebSocket disconnected for terminal job {job_id}")
+            return
+
         while True:
             try:
                 # wait for the next progress event with a timeout
@@ -45,7 +67,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
                 await websocket.send_json(event.to_dict())
 
                 # if the job finished, send the final event and close
-                if event.event_type in ("completed", "failed"):
+                if event.event_type in ("completed", "failed", "cancelled"):
                     logger.info(f"WebSocket closing: job {job_id} {event.event_type}")
                     break
 
@@ -81,6 +103,8 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
     except Exception as exc:
         logger.error(f"WebSocket error for job {job_id}: {exc}")
     finally:
+        if queue is not None:
+            await manager.unsubscribe(job_id, queue)
         try:
             await websocket.close()
         except Exception:

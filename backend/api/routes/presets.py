@@ -4,15 +4,14 @@ CRUD operations for saved keyword sets per client/platform.
 Inspired by old tool's saved_searches MongoDB collection.
 """
 
-from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.core.db import (
-    save_keyword_preset,
-    get_keyword_presets,
-    get_collection,
     SUPPORTED_PLATFORMS,
+    get_collection,
+    get_keyword_presets,
+    save_keyword_preset,
 )
 from backend.core.logger import get_logger
 
