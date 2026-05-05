@@ -554,6 +554,14 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
         screenshot_bytes = None
         profile_picture_b64 = None
+        profile_name = None
+        has_name = False
+        followers = 0
+        location = ""
+        profile_picture_url = ""
+        created_date = "No"
+        last_post_date = ""
+        is_active = False
 
         try:
             # ── 1. NAVIGATE (single page load) ───────────────────────
@@ -804,7 +812,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
         result.comments = ""
         self._calculate_risk(result)
 
-        await self.health.record_request("facebook", success=True)
+        await self.health.record_request("facebook", success=not bool(error_comments))
         logger.info(
             f"Done: {url} → {result.display_name} | "
             f"Followers={followers} | Created={created_date} | Active={is_active}"
@@ -869,8 +877,6 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     # Fallback: scan full innerText for any date-like strings
                     try:
                         inner_text = await page.evaluate("() => document.body.innerText")
-                        with open("debug_auth_text.txt", "w", encoding="utf-8") as f:
-                            f.write(inner_text)
                         
                         patterns = [
                             r"(\d{1,2}\s+[A-Za-z]+(?:\s+at\s+\d{1,2}:\d{2})?)",

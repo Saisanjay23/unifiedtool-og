@@ -18,6 +18,7 @@ from backend.core.db import (
     get_known_urls_for_client,
     get_result_full,
     get_results,
+    get_validated_urls_for_client,
     update_fields,
     update_status,
 )
@@ -147,6 +148,20 @@ async def list_known_urls(
 
     urls = await get_known_urls_for_client(client, platform)
     return {"client": client, "urls": urls}
+
+
+@router.get("/results/{client}/validated-urls")
+async def list_validated_urls(
+    client: str,
+    platform: str | None = Query(None),
+):
+    """Return ALL validated (approved) URLs for a client — not paginated.
+    Used by the frontend for 'Copy All Validated' and 'Analyze ALL Validated' buttons."""
+    if platform and platform not in SUPPORTED_PLATFORMS:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+
+    urls = await get_validated_urls_for_client(client, platform)
+    return {"client": client, "urls": urls, "count": len(urls)}
 
 
 @router.get("/results/{client}")

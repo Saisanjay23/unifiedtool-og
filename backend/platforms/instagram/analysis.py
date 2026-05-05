@@ -108,6 +108,7 @@ class InstagramAnalyzer(AbstractAnalyzer):
             "followers": 0,
             "date_joined": None,
             "profile_pic_url_hd": None,
+            "post_count": -1,
         }
 
         async def capture_graphql(response):
@@ -120,36 +121,46 @@ class InstagramAnalyzer(AbstractAnalyzer):
                     try:
                         json_body = await response.json()
 
-                        def recursive_extract_data(obj):
+                        def recursive_extract_data(obj, current_user=None):
                             if isinstance(obj, dict):
-                                # Check if this dict IS a post/media node with taken_at
+                                user_ctx = current_user
+                                
+                                # Update user context if this node defines an owner/user
+                                for user_key in ["user", "owner"]:
+                                    if user_key in obj and isinstance(obj[user_key], dict) and "username" in obj[user_key]:
+                                        user_ctx = obj[user_key]["username"]
+                                        break
+                                
+                                # If the node itself is a user node
+                                if "username" in obj and "id" in obj:
+                                    user_ctx = obj["username"]
+
                                 has_taken_at = False
                                 taken_at_val = 0
                                 is_pinned = False
 
                                 for k, v in obj.items():
-                                    # Detect taken_at timestamp
                                     if k in ["taken_at", "taken_at_timestamp"] and isinstance(v, int):
                                         has_taken_at = True
                                         taken_at_val = v
-                                    # Detect pinned post indicators
                                     if k in ["timeline_pinned_user_ids", "pinned_for_users"]:
                                         if isinstance(v, list) and len(v) > 0:
                                             is_pinned = True
                                     if k == "is_pinned" and v:
                                         is_pinned = True
 
-                                # Only use taken_at if this post is NOT pinned
                                 if has_taken_at and not is_pinned:
-                                    if taken_at_val > captured_data["max_ts"]:
-                                        captured_data["max_ts"] = taken_at_val
-                                        dt_debug = datetime.datetime.fromtimestamp(taken_at_val, tz=datetime.timezone.utc)
-                                        logger.info(f"IG Post timestamp accepted: {dt_debug.strftime('%d-%m-%Y')} (unix={taken_at_val})")
-                                elif has_taken_at and is_pinned:
-                                    dt_debug = datetime.datetime.fromtimestamp(taken_at_val, tz=datetime.timezone.utc)
-                                    logger.info(f"IG PINNED post SKIPPED: {dt_debug.strftime('%d-%m-%Y')} (unix={taken_at_val})")
+                                    is_valid_user = True
+                                    if user_ctx and result.username:
+                                        if user_ctx.lower() != result.username.lower():
+                                            is_valid_user = False
+                                    
+                                    if is_valid_user:
+                                        if taken_at_val > captured_data["max_ts"]:
+                                            captured_data["max_ts"] = taken_at_val
+                                            dt_debug = datetime.datetime.fromtimestamp(taken_at_val)
+                                            logger.info(f"IG Post timestamp accepted: {dt_debug.strftime('%d-%m-%Y')} (unix={taken_at_val})")
 
-                                # Extract other fields regardless of pinned status
                                 for k, v in obj.items():
                                     if k == "edge_followed_by" and isinstance(v, dict):
                                         count = v.get("count", 0)
@@ -158,19 +169,26 @@ class InstagramAnalyzer(AbstractAnalyzer):
                                     elif k == "follower_count" and isinstance(v, int):
                                         if v > captured_data["followers"]:
                                             captured_data["followers"] = v
+                                    elif k in ["edge_owner_to_timeline_media", "edge_felix_video_timeline"] and isinstance(v, dict):
+                                        count = v.get("count")
+                                        if isinstance(count, int):
+                                            captured_data["post_count"] = count
+                                        recursive_extract_data(v, user_ctx)
+                                    elif k == "media_count" and isinstance(v, int):
+                                        captured_data["post_count"] = v
                                     elif isinstance(v, (dict, list)):
-                                        recursive_extract_data(v)
-                                    # Capture date_joined from API responses
+                                        recursive_extract_data(v, user_ctx)
+                                    
                                     if k == "date_joined" and isinstance(v, (int, float)):
                                         captured_data["date_joined"] = int(v)
                                     elif k == "date_joined" and isinstance(v, str):
                                         captured_data["date_joined"] = v
-                                    # Capture HD Profile Picture
                                     elif k == "profile_pic_url_hd" and isinstance(v, str):
                                         captured_data["profile_pic_url_hd"] = v
+
                             elif isinstance(obj, list):
                                 for item in obj:
-                                    recursive_extract_data(item)
+                                    recursive_extract_data(item, current_user)
 
                         recursive_extract_data(json_body)
                     except Exception:
@@ -582,101 +600,104 @@ class InstagramAnalyzer(AbstractAnalyzer):
 
     async def _extract_last_post_date(self, page, result: ProfileResult, captured_data: dict):
         """
-        DOM-based last post extraction with pinned post bypass.
-
-        Opens top 4 posts from grid (max 3 pinned + 1 real = guaranteed latest).
-        Reads <time datetime> from each post detail page. Takes MAX = latest real post.
-        Falls back to network interception data if DOM fails.
+        Extracts last post date primarily from network interception (accurate and fast),
+        falling back to DOM-based extraction if network data is missing.
         """
         result.is_active = False
 
-        # --- Step 1: DOM-based scan of top 4 posts ---
+        # --- Step 0: Check known post count from network ---
+        if captured_data.get("post_count") == 0:
+            logger.info("Profile has 0 posts based on network data.")
+            result.last_post_date = "No Posts"
+            return
+
+        # --- Step 1: Network interception data (Preferred) ---
+        if captured_data.get("max_ts", 0) > 0:
+            ts = captured_data["max_ts"]
+            dt_local = datetime.datetime.fromtimestamp(ts)  # Local timezone for display
+            dt_utc = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)  # UTC for staleness calc
+            days_ago = (datetime.datetime.now(datetime.timezone.utc) - dt_utc).days
+            result.last_post_date = dt_local.strftime("%d-%m-%Y")
+            result.last_active = result.last_post_date
+            result.is_active = days_ago <= 180
+            logger.info(f"IG Last post date (Network): {dt_local.strftime('%d-%m-%Y')} ({days_ago} days ago)")
+            return
+
+        # --- Step 2: DOM-based fallback ---
         try:
-            all_posts = page.locator("a[href*='/p/'], a[href*='/reel/']")
+            # Look at the article grid specifically to avoid random links
+            all_posts = page.locator("article a[href*='/p/'], article a[href*='/reel/']")
             count = await all_posts.count()
+            
+            if count == 0:
+                all_posts = page.locator("main a[href*='/p/'], main a[href*='/reel/']")
+                count = await all_posts.count()
+
             limit = min(count, 4)  # Top 4: covers 3 pinned + 1 real
 
             if limit == 0:
                 logger.info("No posts found in profile grid")
-                # Fall through to network interception
-            else:
-                candidates = []
-                post_page = await page.context.new_page()
+                private_node = page.locator('h2:has-text("This Account is Private"), h2:has-text("This account is private")')
+                if await private_node.count() > 0:
+                    result.last_post_date = "Private Account"
+                else:
+                    result.last_post_date = "No Posts"
+                return
 
-                try:
-                    for i in range(limit):
+            candidates = []
+            post_page = await page.context.new_page()
+
+            try:
+                for i in range(limit):
+                    try:
+                        post_loc = all_posts.nth(i)
+                        href = await post_loc.get_attribute("href")
+                        if not href:
+                            continue
+
+                        post_url = "https://www.instagram.com" + href if href.startswith("/") else href
+
                         try:
-                            post_loc = all_posts.nth(i)
-                            href = await post_loc.get_attribute("href")
-                            if not href:
-                                continue
-
-                            post_url = "https://www.instagram.com" + href if href.startswith("/") else href
+                            await post_page.goto(post_url, wait_until="domcontentloaded", timeout=25000)
 
                             try:
-                                await post_page.goto(post_url, wait_until="domcontentloaded", timeout=25000)
+                                await post_page.wait_for_selector("time[datetime]", timeout=5000)
+                                time_el = post_page.locator("time[datetime]").first
+                                iso = await time_el.get_attribute("datetime")
+                                if iso:
+                                    dt = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                                    ts = int(dt.timestamp())
+                                    candidates.append((ts, dt))
+                                    logger.info(f"IG Post[{i}] date from DOM: {dt.strftime('%d-%m-%Y')} (href={href})")
+                            except Exception:
+                                logger.warning(f"IG Post[{i}] no <time> tag found (href={href})")
 
-                                try:
-                                    await post_page.wait_for_selector("time[datetime]", timeout=5000)
-                                    time_el = post_page.locator("time[datetime]").first
-                                    iso = await time_el.get_attribute("datetime")
-                                    if iso:
-                                        dt = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-                                        ts = int(dt.timestamp())
-                                        candidates.append((ts, dt))
-                                        logger.info(f"IG Post[{i}] date from DOM: {dt.strftime('%d-%m-%Y')} (href={href})")
-                                except Exception:
-                                    logger.warning(f"IG Post[{i}] no <time> tag found (href={href})")
+                            # Anti-ban delay between post page loads
+                            await asyncio.sleep(random.uniform(1.0, 2.0))
+                        except Exception as e:
+                            logger.warning(f"IG Post[{i}] failed to load: {e}")
+                    except Exception:
+                        pass
+            finally:
+                await post_page.close()
 
-                                # Anti-ban delay between post page loads
-                                await asyncio.sleep(random.uniform(1.0, 2.0))
-                            except Exception as e:
-                                logger.warning(f"IG Post[{i}] failed to load: {e}")
-                        except Exception:
-                            pass
-                finally:
-                    await post_page.close()
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                best_ts, best_dt = candidates[0]
 
-                if candidates:
-                    candidates.sort(key=lambda x: x[0], reverse=True)
-                    best_ts, best_dt = candidates[0]
-
-                    result.last_post_date = best_dt.strftime("%d-%m-%Y")
-                    result.last_active = result.last_post_date
-                    days_ago = (datetime.datetime.now(datetime.timezone.utc) - best_dt).days
-                    result.is_active = days_ago <= 180
-                    logger.info(f"IG Last post date (DOM): {best_dt.strftime('%d-%m-%Y')} ({days_ago} days ago)")
-                    return
+                result.last_post_date = best_dt.strftime("%d-%m-%Y")
+                result.last_active = result.last_post_date
+                days_ago = (datetime.datetime.now(datetime.timezone.utc) - best_dt).days
+                result.is_active = days_ago <= 180
+                logger.info(f"IG Last post date (DOM): {best_dt.strftime('%d-%m-%Y')} ({days_ago} days ago)")
+                return
+            else:
+                result.last_post_date = "Date Unknown"
 
         except Exception as e:
             logger.warning(f"DOM-based last post extraction failed: {e}")
-
-        # --- Step 2: Fallback to network interception data ---
-        if captured_data["max_ts"] > 0:
-            ts = captured_data["max_ts"]
-            dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-            days_ago = (datetime.datetime.now(datetime.timezone.utc) - dt).days
-            result.last_post_date = dt.strftime("%d-%m-%Y")
-            result.last_active = result.last_post_date
-            result.is_active = days_ago <= 180
-            logger.info(f"IG Last post date (Network fallback): {dt.strftime('%d-%m-%Y')} ({days_ago} days ago)")
-            return
-
-        # --- Step 3: Scroll to trigger more network data ---
-        try:
-            for _ in range(3):
-                await page.mouse.wheel(0, 5000)
-                await asyncio.sleep(1.5)
-                if captured_data["max_ts"] > 0:
-                    ts = captured_data["max_ts"]
-                    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-                    days_ago = (datetime.datetime.now(datetime.timezone.utc) - dt).days
-                    result.last_post_date = dt.strftime("%d-%m-%Y")
-                    result.last_active = result.last_post_date
-                    result.is_active = days_ago <= 180
-                    return
-        except Exception:
-            pass
+            if not result.last_post_date:
+                result.last_post_date = "Error Extracting Date"
 
     async def _dismiss_ig_popups(self, page):
         """Dismiss Instagram popups (challenges, cookie consent, notifications, login prompts)."""

@@ -14,6 +14,7 @@ import {
     exportResults,
     getKeywords,
     getKnownUrls,
+    getValidatedUrls,
 } from '../api/client';
 import useStore from '../store';
 
@@ -110,87 +111,97 @@ function ProfileCard({
                 </span>
             </div>
 
-            {/* Profile Name */}
-            <h4 className="profile-card__name" title={result.display_name || result.username}>
-                <span className="name-text">
-                    {result.display_name || result.username || 'Unknown'}
-                </span>
-                {result.is_verified && <span className="verified-badge" title="Verified">✓</span>}
-            </h4>
+            {/* Content area — flexible middle section */}
+            <div className="profile-card__content">
+                {/* Profile Name */}
+                <h4 className="profile-card__name" title={result.display_name || result.username}>
+                    <span className="name-text">
+                        {result.display_name || result.username || 'Unknown'}
+                    </span>
+                    {result.is_verified && <span className="verified-badge" title="Verified">✓</span>}
+                </h4>
 
-            {/* Meta row: entity type + keyword */}
-            <div className="profile-card__meta">
-                <span>{result.entity_type || result.platform}</span>
-                <span title="Keyword match">
-                    {result.keyword || (Array.isArray(result.keywords) ? result.keywords.join(', ') : '')}
-                </span>
+                {/* Meta row: entity type + keyword */}
+                <div className="profile-card__meta">
+                    <span>{result.entity_type || result.platform}</span>
+                    <span title={Array.isArray(result.keywords) ? result.keywords.join(', ') : (result.keyword || '')}>
+                        {(() => {
+                            const kws = Array.isArray(result.keywords) ? result.keywords : (result.keyword ? [result.keyword] : []);
+                            if (kws.length === 0) return '';
+                            if (kws.length <= 2) return kws.join(', ');
+                            return `${kws.slice(0, 2).join(', ')} +${kws.length - 2} more`;
+                        })()}
+                    </span>
+                </div>
+
+                {/* Bio (skip for Telegram) */}
+                {result.bio && result.platform !== 'telegram' && (
+                    <p className="profile-card__bio" title={result.bio}>
+                        {result.bio.substring(0, 80)}{result.bio.length > 80 ? '...' : ''}
+                    </p>
+                )}
+
+                {/* Stats */}
+                <div className="profile-card__stats-grid">
+                    {(result.followers !== null && result.followers !== undefined) && (
+                        <div className="stat-item" title="Followers">
+                            <span className="stat-icon">👥</span>
+                            <span>{result.followers?.toLocaleString()}</span>
+                        </div>
+                    )}
+                    {result.location && (
+                        <div className="stat-item" title="Location">
+                            <span className="stat-icon">📍</span>
+                            <span>{result.location.substring(0, 15)}{result.location.length > 15 ? '...' : ''}</span>
+                        </div>
+                    )}
+                    {result.last_post_date && (
+                        <div className="stat-item" title="Last Post">
+                            <span className="stat-icon">🕒</span>
+                            <span>{result.last_post_date}</span>
+                        </div>
+                    )}
+                    {result.created_at && (
+                        <div className="stat-item" title="Created/Joined">
+                            <span className="stat-icon">📅</span>
+                            <span>{String(result.created_at).substring(0, 12)}</span>
+                        </div>
+                    )}
+                </div>
             </div>
 
-            {/* Bio */}
-            {result.bio && (
-                <p className="profile-card__bio" title={result.bio}>
-                    {result.bio.substring(0, 80)}{result.bio.length > 80 ? '...' : ''}
-                </p>
-            )}
+            {/* Footer — pinned to bottom of card */}
+            <div className="profile-card__footer">
+                {/* Action Buttons */}
+                <div className="profile-card__actions-row">
+                    {result.status !== 'approved' && (
+                        <button className="btn-validate" onClick={(e) => { e.stopPropagation(); onApprove(result); }} title="Validate">
+                            ✓ Validate
+                        </button>
+                    )}
+                    {result.status !== 'rejected' && (
+                        <button className="btn-reject-styled" onClick={(e) => { e.stopPropagation(); onReject(result); }} title="Reject">
+                            ✕ Reject
+                        </button>
+                    )}
+                </div>
 
-            {/* Stats */}
-            <div className="profile-card__stats-grid">
-                {(result.followers !== null && result.followers !== undefined) && (
-                    <div className="stat-item" title="Followers">
-                        <span className="stat-icon">👥</span>
-                        <span>{result.followers?.toLocaleString()}</span>
-                    </div>
-                )}
-                {result.location && (
-                    <div className="stat-item" title="Location">
-                        <span className="stat-icon">📍</span>
-                        <span>{result.location.substring(0, 15)}{result.location.length > 15 ? '...' : ''}</span>
-                    </div>
-                )}
-                {result.last_post_date && (
-                    <div className="stat-item" title="Last Post">
-                        <span className="stat-icon">🕒</span>
-                        <span>{result.last_post_date}</span>
-                    </div>
-                )}
-                {result.created_at && (
-                    <div className="stat-item" title="Created/Joined">
-                        <span className="stat-icon">📅</span>
-                        <span>{String(result.created_at).substring(0, 12)}</span>
-                    </div>
-                )}
-            </div>
-
-
-            {/* Action Buttons — Stitch-styled */}
-            <div className="profile-card__actions-row">
-                {result.status !== 'approved' && (
-                    <button className="btn-validate" onClick={(e) => { e.stopPropagation(); onApprove(result); }} title="Validate">
-                        ✓ Validate
-                    </button>
-                )}
-                {result.status !== 'rejected' && (
-                    <button className="btn-reject-styled" onClick={(e) => { e.stopPropagation(); onReject(result); }} title="Reject">
-                        ✕ Reject
-                    </button>
-                )}
-            </div>
-
-            <a href={result.url} target={result.url && result.url.startsWith('tg://') ? '_self' : '_blank'} rel="noopener noreferrer" className="btn-view-profile"
-                onClick={(e) => e.stopPropagation()}
-            >
-                View Profile →
-            </a>
-
-            {/* Selection checkbox for validated tab */}
-            {isValidatedTab && (
-                <button
-                    className={`btn-select ${selected ? 'btn-select--active' : ''}`}
-                    onClick={(e) => { e.stopPropagation(); onSelect(result._id); }}
+                <a href={result.url} target={result.url && result.url.startsWith('tg://') ? '_self' : '_blank'} rel="noopener noreferrer" className="btn-view-profile"
+                    onClick={(e) => e.stopPropagation()}
                 >
-                    {selected ? '✅ Selected' : '⬜ Select'}
-                </button>
-            )}
+                    View Profile →
+                </a>
+
+                {/* Selection checkbox for validated tab */}
+                {isValidatedTab && (
+                    <button
+                        className={`btn-select ${selected ? 'btn-select--active' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); onSelect(result._id); }}
+                    >
+                        {selected ? '✅ Selected' : '⬜ Select'}
+                    </button>
+                )}
+            </div>
         </div>
     );
 }
@@ -207,6 +218,7 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
     const [page, setPage] = useState(0);
     const [selectedIds, setSelectedIds] = useState(new Set());
     const [hiddenIds, setHiddenIds] = useState(new Set());
+    const [loadingAllUrls, setLoadingAllUrls] = useState(false);
 
     // Clear hidden/selected state when filters or tabs change
     useEffect(() => {
@@ -279,6 +291,18 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
         ...activeJobKeywords,
         ...(liveResults || []).map(r => r.keyword).filter(Boolean) // Instantly appear in dropdown
     ])).sort();
+
+    // Fetch TOTAL validated count (not paginated) — used by ALL buttons in validated tab
+    const { data: validatedUrlsData } = useQuery({
+        queryKey: ['validated-urls-count', selectedClient, activePlatform],
+        queryFn: async () => {
+            const res = await getValidatedUrls(selectedClient, activePlatform);
+            return res.data;
+        },
+        enabled: !!selectedClient && !!activePlatform && activeTab === 'approved',
+        refetchInterval: 15000,
+    });
+    const totalValidatedCount = validatedUrlsData?.count || 0;
 
     // Status mutation with OPTIMISTIC update — card vanishes immediately
     const statusMutation = useMutation({
@@ -399,10 +423,28 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
         }
     };
 
-    const handleCopyAllValidated = () => {
-        const urls = results.map(r => r.url);
-        if (urls.length > 0) {
-            navigator.clipboard.writeText(urls.join('\n'));
+    const handleCopyAllValidated = async () => {
+        // Fetch ALL validated URLs from backend, not just current page
+        setLoadingAllUrls(true);
+        try {
+            const res = await getValidatedUrls(selectedClient, activePlatform);
+            const urls = res.data.urls || [];
+            if (urls.length > 0) {
+                navigator.clipboard.writeText(urls.join('\n'));
+                alert(`✅ Copied ${urls.length} validated URLs to clipboard`);
+            } else {
+                alert('No validated URLs found');
+            }
+        } catch (err) {
+            console.error('Failed to fetch validated URLs:', err);
+            // Fallback to current page results
+            const urls = results.map(r => r.url);
+            if (urls.length > 0) {
+                navigator.clipboard.writeText(urls.join('\n'));
+                alert(`Copied ${urls.length} URLs from current page (backend fetch failed)`);
+            }
+        } finally {
+            setLoadingAllUrls(false);
         }
     };
 
@@ -499,61 +541,99 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
 
             {/* Action buttons for validated tab */}
             {activeTab === 'approved' && results.length > 0 && (
-                <div style={{
-                    display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
-                    marginBottom: 'var(--space-sm)', padding: '8px 0',
-                }}>
-                    <button
-                        style={{
-                            fontSize: 13, padding: '10px 16px', borderRadius: 8,
-                            background: 'linear-gradient(135deg, #0891b2, #06b6d4)',
-                            color: '#fff', border: 'none', cursor: selectedIds.size === 0 ? 'not-allowed' : 'pointer',
-                            fontWeight: 600, opacity: selectedIds.size === 0 ? 0.5 : 1,
-                        }}
-                        onClick={() => {
-                            const urls = results.filter(r => selectedIds.has(r._id)).map(r => r.url);
-                            if (urls.length > 0 && onAnalyzeUrls) onAnalyzeUrls(urls);
-                        }}
-                        disabled={selectedIds.size === 0}
-                    >
-                        🔬 Analyze SELECTED Profiles ({selectedIds.size})
-                    </button>
-                    <button
-                        style={{
-                            fontSize: 13, padding: '10px 16px', borderRadius: 8,
-                            background: 'linear-gradient(135deg, #059669, #10b981)',
-                            color: '#fff', border: 'none', cursor: 'pointer', fontWeight: 600,
-                        }}
-                        onClick={() => {
-                            const urls = results.map(r => r.url);
-                            if (urls.length > 0 && onAnalyzeUrls) onAnalyzeUrls(urls);
-                        }}
-                    >
-                        🔬 Analyze ALL Validated ({results.length})
-                    </button>
-                    <button
-                        style={{
-                            fontSize: 13, padding: '10px 16px', borderRadius: 8,
-                            background: 'linear-gradient(135deg, #1e3a5f, #2563eb)',
-                            color: '#fff', border: 'none', cursor: selectedIds.size === 0 ? 'not-allowed' : 'pointer',
-                            fontWeight: 600, opacity: selectedIds.size === 0 ? 0.5 : 1,
-                        }}
-                        onClick={handleCopySelected}
-                        disabled={selectedIds.size === 0}
-                    >
-                        📋 Copy Selected Profile URLs ({selectedIds.size})
-                    </button>
-                    <button
-                        style={{
-                            fontSize: 13, padding: '10px 16px', borderRadius: 8,
-                            background: 'linear-gradient(135deg, #6b21a8, #7c3aed)',
-                            color: '#fff', border: 'none', cursor: 'pointer', fontWeight: 600,
-                        }}
-                        onClick={handleCopyAllValidated}
-                    >
-                        📋 Copy All Validated Profile URLs ({results.length})
-                    </button>
-                </div>
+                <>
+                    {/* Info banner: total validated count */}
+                    {totalValidatedCount > results.length && (
+                        <div style={{
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            padding: '10px 16px', marginBottom: 8,
+                            background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(16,185,129,0.08))',
+                            border: '1px solid rgba(34,197,94,0.2)',
+                            borderRadius: 10, fontSize: 13, color: 'var(--text-secondary)',
+                        }}>
+                            <span style={{ fontSize: 16 }}>📊</span>
+                            <span>
+                                Showing <strong style={{ color: 'var(--text-primary)' }}>{results.length}</strong> of{' '}
+                                <strong style={{ color: '#22c55e' }}>{totalValidatedCount}</strong> total validated profiles.
+                                Use the <em>"ALL"</em> buttons below to copy or analyze all {totalValidatedCount} profiles.
+                            </span>
+                        </div>
+                    )}
+                    <div style={{
+                        display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
+                        marginBottom: 'var(--space-sm)', padding: '8px 0',
+                    }}>
+                        <button
+                            style={{
+                                fontSize: 13, padding: '10px 16px', borderRadius: 8,
+                                background: 'linear-gradient(135deg, #0891b2, #06b6d4)',
+                                color: '#fff', border: 'none', cursor: selectedIds.size === 0 ? 'not-allowed' : 'pointer',
+                                fontWeight: 600, opacity: selectedIds.size === 0 ? 0.5 : 1,
+                            }}
+                            onClick={() => {
+                                const urls = results.filter(r => selectedIds.has(r._id)).map(r => r.url);
+                                if (urls.length > 0 && onAnalyzeUrls) onAnalyzeUrls(urls);
+                            }}
+                            disabled={selectedIds.size === 0}
+                        >
+                            🔬 Analyze SELECTED Profiles ({selectedIds.size})
+                        </button>
+                        <button
+                            style={{
+                                fontSize: 13, padding: '10px 16px', borderRadius: 8,
+                                background: loadingAllUrls
+                                    ? 'linear-gradient(135deg, #374151, #4b5563)'
+                                    : 'linear-gradient(135deg, #059669, #10b981)',
+                                color: '#fff', border: 'none', cursor: loadingAllUrls ? 'wait' : 'pointer',
+                                fontWeight: 600, transition: 'all 0.2s ease',
+                            }}
+                            disabled={loadingAllUrls}
+                            onClick={async () => {
+                                setLoadingAllUrls(true);
+                                try {
+                                    const res = await getValidatedUrls(selectedClient, activePlatform);
+                                    const urls = res.data.urls || [];
+                                    if (urls.length > 0 && onAnalyzeUrls) onAnalyzeUrls(urls);
+                                    else alert('No validated URLs found');
+                                } catch (err) {
+                                    console.error('Failed to fetch validated URLs:', err);
+                                    const urls = results.map(r => r.url);
+                                    if (urls.length > 0 && onAnalyzeUrls) onAnalyzeUrls(urls);
+                                } finally {
+                                    setLoadingAllUrls(false);
+                                }
+                            }}
+                        >
+                            {loadingAllUrls ? '⏳ Fetching...' : `🔬 Analyze ALL Validated (${totalValidatedCount})`}
+                        </button>
+                        <button
+                            style={{
+                                fontSize: 13, padding: '10px 16px', borderRadius: 8,
+                                background: 'linear-gradient(135deg, #1e3a5f, #2563eb)',
+                                color: '#fff', border: 'none', cursor: selectedIds.size === 0 ? 'not-allowed' : 'pointer',
+                                fontWeight: 600, opacity: selectedIds.size === 0 ? 0.5 : 1,
+                            }}
+                            onClick={handleCopySelected}
+                            disabled={selectedIds.size === 0}
+                        >
+                            📋 Copy Selected Profile URLs ({selectedIds.size})
+                        </button>
+                        <button
+                            style={{
+                                fontSize: 13, padding: '10px 16px', borderRadius: 8,
+                                background: loadingAllUrls
+                                    ? 'linear-gradient(135deg, #374151, #4b5563)'
+                                    : 'linear-gradient(135deg, #6b21a8, #7c3aed)',
+                                color: '#fff', border: 'none', cursor: loadingAllUrls ? 'wait' : 'pointer',
+                                fontWeight: 600, transition: 'all 0.2s ease',
+                            }}
+                            disabled={loadingAllUrls}
+                            onClick={handleCopyAllValidated}
+                        >
+                            {loadingAllUrls ? '⏳ Fetching...' : `📋 Copy ALL Validated URLs (${totalValidatedCount})`}
+                        </button>
+                    </div>
+                </>
             )}
 
             {/* Results Content */}

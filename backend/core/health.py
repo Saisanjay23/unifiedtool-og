@@ -176,7 +176,13 @@ class HealthManager:
     def _check_correlated_failure(self, now: float):
         """
         If 3+ platforms degrade within 5 minutes, suspect an IP block.
+        Truncates old timestamps to prevent unbounded memory growth.
         """
+        # Prune timestamps older than 5 minutes to prevent unbounded list growth
+        self._degradation_timestamps = [
+            t for t in self._degradation_timestamps if now - t < 300
+        ]
+
         degraded_count = sum(
             1
             for h in self._platforms.values()
@@ -184,9 +190,7 @@ class HealthManager:
         )
 
         if degraded_count >= 3:
-            # check if this is a new correlation event
-            recent_events = [t for t in self._degradation_timestamps if now - t < 300]
-            if len(recent_events) < 3:
+            if len(self._degradation_timestamps) < 3:
                 self._degradation_timestamps.append(now)
                 logger.warning(
                     f"IP_BLOCK_SUSPECTED: {degraded_count} platforms degraded simultaneously"
@@ -208,16 +212,26 @@ class HealthManager:
             return "degraded"
         return "critical"
 
+    def _is_hour_window_expired(self, health: PlatformHealth) -> bool:
+        """Check if the hourly window has expired (read-only, no mutation)."""
+        return time.time() - health.hour_window_start >= 3600
+
     def get_all_health(self) -> dict:
-        """Return health data for all platforms."""
+        """Return health data for all platforms (read-only, no lock needed)."""
         result = {}
         for name, health in self._platforms.items():
-            self._reset_hour_window(health)
+            # Use the actual count, or 0 if the window has expired.
+            # The window will be properly reset on the next record_request() call
+            # which holds the lock.  This avoids mutating state without the lock.
+            requests_this_hour = (
+                0 if self._is_hour_window_expired(health)
+                else health.requests_this_hour
+            )
             result[name] = {
                 "score": round(health.health_score, 3),
                 "status": self.get_health_status(name),
                 "total_requests": health.total_requests,
-                "requests_this_hour": health.requests_this_hour,
+                "requests_this_hour": requests_this_hour,
                 "consecutive_errors": health.consecutive_errors,
                 "is_suspended": health.is_suspended,
                 "last_request_at": health.last_request_at,
@@ -289,9 +303,13 @@ class HealthManager:
 
     async def run_health_writer(self):
         """Background task: write health snapshot every 60 seconds."""
-        while True:
-            await self.write_health_snapshot()
-            await asyncio.sleep(60)
+        try:
+            while True:
+                await self.write_health_snapshot()
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info("Health writer loop stopped")
+            raise
 
     def clear_suspension(self, platform: str):
         """Manually clear a platform suspension (e.g., after re-login)."""

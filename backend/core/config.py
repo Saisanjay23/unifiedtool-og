@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # Optional browser proxy, for example: http://user:pass@proxy:8080
     PROXY_URL: str | None = None
 
+    # Multiple proxies for rotation (comma-separated).
+    # Example: "socks5://p1:1080,http://user:pass@p2:8080,socks5://p3:1080"
+    # When set, overrides PROXY_URL with round-robin rotation.
+    PROXY_URLS: str | None = None
+
     # Rate limits per hour per platform
     RATE_LIMIT_FACEBOOK: int = 30
     RATE_LIMIT_INSTAGRAM: int = 60
@@ -106,6 +111,22 @@ class Settings(BaseSettings):
         """Create required directories if they do not exist."""
         for path in [self.SESSION_PATH, self.LOG_PATH]:
             os.makedirs(path, exist_ok=True)
+
+    def get_proxy_rotator(self):
+        """Lazily create and return a ProxyRotator from PROXY_URLS.
+        Returns None if PROXY_URLS is not configured."""
+        if not hasattr(self, '_proxy_rotator'):
+            self._proxy_rotator = None
+            if self.PROXY_URLS:
+                try:
+                    from backend.stealth.proxy import ProxyRotator
+                    proxies = [p.strip() for p in self.PROXY_URLS.split(",") if p.strip()]
+                    if proxies:
+                        self._proxy_rotator = ProxyRotator(proxies)
+                except Exception as e:
+                    import logging
+                    logging.getLogger("core.config").warning(f"Failed to create ProxyRotator: {e}")
+        return self._proxy_rotator
 
 
 settings = Settings()

@@ -1224,7 +1224,7 @@ html, body, #root {
   animation: fadeSlideUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
   display: flex;
   flex-direction: column;
-  height: 460px;
+  min-height: 460px;
   overflow: hidden;
   transform-style: preserve-3d;
   will-change: transform;
@@ -1316,6 +1316,16 @@ html, body, #root {
 .profile-card__meta {
   display: flex; justify-content: space-between;
   font-size: 11px; color: var(--text-muted); margin-bottom: 6px;
+  gap: 8px;
+}
+
+.profile-card__meta > span {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.profile-card__meta > span:last-child {
+  text-align: right; flex-shrink: 1;
 }
 
 .profile-card__bio {
@@ -1327,8 +1337,22 @@ html, body, #root {
 
 .profile-card__stats-grid {
   display: grid; grid-template-columns: repeat(3, 1fr);
-  gap: 4px; margin-top: auto; margin-bottom: 8px;
+  gap: 4px; margin-bottom: 8px;
   padding-top: 8px; border-top: 1px solid var(--border-subtle);
+}
+
+/* Flexible content area — takes remaining space between image and footer */
+.profile-card__content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Footer pinned to bottom of card */
+.profile-card__footer {
+  margin-top: auto;
+  flex-shrink: 0;
 }
 
 .stat-item {
@@ -1369,6 +1393,7 @@ html, body, #root {
   border-radius: 6px; color: var(--text-secondary);
   font-size: 12px; text-decoration: none;
   transition: all 0.2s ease; margin-bottom: 6px;
+  flex-shrink: 0;
 }
 
 .btn-view-profile:hover {
@@ -2140,11 +2165,14 @@ html, body, #root {
    ENHANCED PROFILE CARDS (Stitch-inspired)
    ============================================= */
 .profile-card__actions-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
   gap: 6px;
-  margin-top: auto;
   padding-top: 8px;
+  flex-shrink: 0;
+}
+
+.profile-card__actions-row > button {
+  flex: 1;
 }
 
 .btn-validate {

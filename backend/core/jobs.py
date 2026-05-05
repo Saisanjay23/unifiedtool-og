@@ -358,15 +358,17 @@ class JobManager:
         now = datetime.now(timezone.utc)
         to_remove = []
 
-        for job_id, job in self._jobs.items():
-            if job.status in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED):
-                if (
-                    job.finished_at
-                    and (now - job.finished_at).total_seconds() > max_age_seconds
-                ):
-                    to_remove.append(job_id)
-
+        # Hold the lock for BOTH scanning and removal to prevent
+        # concurrent dict mutation from create_job / _publish_event.
         async with self._lock:
+            for job_id, job in self._jobs.items():
+                if job.status in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED):
+                    if (
+                        job.finished_at
+                        and (now - job.finished_at).total_seconds() > max_age_seconds
+                    ):
+                        to_remove.append(job_id)
+
             for job_id in to_remove:
                 self._jobs.pop(job_id, None)
                 self._tasks.pop(job_id, None)

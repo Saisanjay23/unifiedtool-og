@@ -42,6 +42,11 @@ STEALTH_ARGS = [
     "--metrics-recording-only",
     "--no-first-run",
     "--disable-component-update",
+    # WebRTC leak prevention: force WebRTC to respect proxy settings,
+    # preventing local/real IP address leaks through STUN/TURN requests.
+    # Inspired by Scrapling's block_webrtc feature.
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--disable-features=WebRtcHideLocalIpsWithMdns",
 ]
 
 
@@ -49,6 +54,7 @@ async def create_stealth_browser(
     platform: str,
     headless: bool = True,
     session_file: str | None = None,
+    block_ads: bool = False,
 ) -> tuple[Playwright, Browser, BrowserContext, Page]:
     """
     Launch a fully stealth-patched Chromium browser.
@@ -62,6 +68,8 @@ async def create_stealth_browser(
         platform: platform name (used for device profile selection)
         headless: run headless or visible
         session_file: path to Playwright storage state JSON (logged-in session)
+        block_ads: if True, block requests to known ad/tracker domains
+                   (safe for discovery, avoid for analysis where full page rendering matters)
     """
     # load (or create) the persistent device profile for this platform
     profile_mgr = DeviceProfileManager(platform)
@@ -78,16 +86,35 @@ async def create_stealth_browser(
     # launch the browser
     pw = await async_playwright().start()
     try:
+        launch_args = list(STEALTH_ARGS) + [
+            f"--window-size={viewport['width']},{viewport['height']}",
+        ]
+
         launch_opts = {
             "headless": headless,
-            "args": STEALTH_ARGS
-            + [f"--window-size={viewport['width']},{viewport['height']}"],
+            "args": launch_args,
         }
 
-        # Route through proxy if configured (enables access when platforms are blocked)
-        if settings.PROXY_URL:
-            launch_opts["proxy"] = {"server": settings.PROXY_URL}
-            logger.info(f"{platform}: Using proxy {settings.PROXY_URL}")
+        # Route through proxy — supports both single proxy and rotation
+        proxy_rotator = settings.get_proxy_rotator()
+        proxy_url = None
+        if proxy_rotator:
+            proxy_url = proxy_rotator.next()
+            launch_opts["proxy"] = {"server": proxy_url}
+            logger.info(f"{platform}: Using rotated proxy {proxy_url} (pool of {proxy_rotator.count})")
+        elif settings.PROXY_URL:
+            proxy_url = settings.PROXY_URL
+            launch_opts["proxy"] = {"server": proxy_url}
+            logger.info(f"{platform}: Using proxy {proxy_url}")
+
+        # DNS-over-HTTPS: when using a proxy, route DNS through Cloudflare's DoH
+        # to prevent DNS leaks revealing which domains we're scraping.
+        # Inspired by Scrapling's dns_over_https feature.
+        if proxy_url:
+            launch_args.append(
+                "--dns-over-https-templates=https://cloudflare-dns.com/dns-query"
+            )
+            logger.debug(f"{platform}: DNS-over-HTTPS enabled (leak prevention)")
 
         browser = await pw.chromium.launch(**launch_opts)
     except Exception as exc:
@@ -124,6 +151,22 @@ async def create_stealth_browser(
 
     stealth_scripts = [
         get_navigator_override_script(profile),  # Always apply (webdriver=false, etc.)
+        # Document visibility spoofing — prevent platforms from detecting
+        # background/hidden/headless tabs and throttling or blocking scraping.
+        # Inspired by Scrapling's global visibility override.
+        # Applied to ALL platforms (TikTok's extended version below adds event blocking too).
+        """
+        (function() {
+            Object.defineProperty(document, 'visibilityState', {
+                get: function() { return 'visible'; },
+                configurable: true
+            });
+            Object.defineProperty(document, 'hidden', {
+                get: function() { return false; },
+                configurable: true
+            });
+        })();
+        """,
     ]
 
     if platform in AGGRESSIVE_STEALTH_PLATFORMS:
@@ -134,7 +177,7 @@ async def create_stealth_browser(
         ])
         logger.debug(f"{platform}: Full stealth fingerprint spoofing enabled")
     else:
-        logger.debug(f"{platform}: Using minimal stealth (navigator only) to avoid detection")
+        logger.debug(f"{platform}: Using minimal stealth (navigator + visibility) to avoid detection")
 
     for script in stealth_scripts:
         await context.add_init_script(script)
@@ -245,15 +288,34 @@ async def create_stealth_browser(
     page.set_default_timeout(settings.REQUEST_TIMEOUT_SEC * 1000)
     page.set_default_navigation_timeout(settings.REQUEST_TIMEOUT_SEC * 1000)
 
+    # Ad/tracker domain blocking — opt-in via block_ads parameter.
+    # Blocks requests at the domain level (not resource-type level),
+    # which is safer and doesn't break platform JS bundles.
+    # Inspired by Scrapling's block_ads feature.
+    if block_ads:
+        from backend.stealth.blocklist import is_blocked_domain
+
+        async def _ad_block_handler(route):
+            if is_blocked_domain(route.request.url):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", _ad_block_handler)
+        logger.debug(f"{platform}: Ad/tracker domain blocking enabled")
+
     # Resource blocking DISABLED globally.
     # The catch-all route handler (page.route("**/*", ...)) was interfering with
     # platform JS bundles, causing Twitter's "Something went wrong" error and
     # Facebook's infinite loading spinner. The memory savings from blocking
     # media/font resources are not worth the reliability cost.
+    # NOTE: Domain-level ad blocking (above) is safe because it only blocks
+    # third-party tracker domains, not platform resources.
 
     logger.info(
         f"{platform}: Browser ready (headless={headless}, "
-        f"profile={profile['name']}, viewport={viewport['width']}x{viewport['height']})"
+        f"profile={profile['name']}, viewport={viewport['width']}x{viewport['height']}, "
+        f"block_ads={block_ads})"
     )
 
     return pw, browser, context, page

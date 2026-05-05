@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from backend.core.jobs import JobManager
+from backend.core.jobs import JobManager, JobState
 from backend.core.logger import get_logger
 
 logger = get_logger("api.websocket")
@@ -79,7 +79,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
                         {"event_type": "error", "message": "Job not found"}
                     )
                     break
-                elif job.status in ("completed", "failed", "cancelled"):
+                elif job.status in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED):
                     await websocket.send_json(
                         {
                             "event_type": job.status,

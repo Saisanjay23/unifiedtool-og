@@ -116,6 +116,12 @@ def get_collection(platform: str, collection_name: str = COLLECTION_NAME):
     return get_db(platform)[collection_name]
 
 
+def get_global_db():
+    """Return the global database (not tied to any specific platform).
+    Used for cross-platform data like the client list."""
+    return get_client()[f"{settings.MONGO_DB_PREFIX}_global"]
+
+
 async def init_indexes():
     """
     Ensures O(log N) lookup complexity for critical read paths.
@@ -160,10 +166,9 @@ async def init_indexes():
 
         logger.info(f"Indexes ensured for {platform}")
 
-    # Global Client Index
-    global_db = get_client()[
-        settings.get_db_name("facebook")
-    ]  # Use facebook DB as the "master" for globals
+    # Global Client Index — stored in a dedicated global database,
+    # not tied to any specific platform.
+    global_db = get_global_db()
     await global_db[GLOBAL_CLIENTS_COLLECTION].create_index(
         [("name", 1)], unique=True, name="idx_global_client_name"
     )
@@ -187,7 +192,7 @@ async def save_client(name: str) -> bool:
     """
     Establishes a global tenant identifier. Uses upsert semantics to ensure atomicity.
     """
-    global_db = get_client()[settings.get_db_name("facebook")]
+    global_db = get_global_db()
     try:
         await global_db[GLOBAL_CLIENTS_COLLECTION].update_one(
             {"name": name},
@@ -281,15 +286,16 @@ async def save_result(result: ProfileResult) -> tuple[str, bool]:
 
 
 async def bulk_save_results(results: list[ProfileResult]) -> int:
-    """Save multiple results, returns count of documents saved."""
-    saved_count = 0
+    """Save multiple results via upsert. Returns count of NEW documents inserted."""
+    new_count = 0
     for result in results:
         try:
             _, is_new = await save_result(result)
-            saved_count += 1  # type: ignore
+            if is_new:
+                new_count += 1
         except Exception as exc:
             logger.warning(f"Failed to save result {result.url}: {exc}")
-    return saved_count
+    return new_count
 
 
 async def get_results(
@@ -410,7 +416,7 @@ async def get_all_clients() -> list[str]:
 
     # Get from global collection first
     try:
-        global_db = get_client()[settings.get_db_name("facebook")]
+        global_db = get_global_db()
         cursor = global_db[GLOBAL_CLIENTS_COLLECTION].find({}, {"name": 1})
         async for doc in cursor:
             clients.add(doc["name"])
@@ -440,7 +446,7 @@ async def delete_client(client: str) -> int:
 
     # Delete from global collection
     try:
-        global_db = get_client()[settings.get_db_name("facebook")]
+        global_db = get_global_db()
         await global_db[GLOBAL_CLIENTS_COLLECTION].delete_one({"name": client})
     except Exception as e:
         logger.error(f"Failed to delete global client {client}: {e}")
@@ -530,6 +536,27 @@ async def get_known_urls_for_client(
                 all_urls.add(doc["url"])
 
     return list(all_urls)
+
+
+async def get_validated_urls_for_client(
+    client: str, platform: str | None = None
+) -> list[str]:
+    """Return all VALIDATED (approved) URLs for a client.
+    Unlike get_known_urls_for_client, this only returns approved profiles.
+    Used by the frontend to copy/analyze ALL validated profiles, not just the current page."""
+    all_urls = []
+    platforms_to_check = [platform] if platform else SUPPORTED_PLATFORMS
+
+    for plat in platforms_to_check:
+        coll = get_collection(plat)
+        async for doc in coll.find(
+            {"client_name": client, "status": "approved"},
+            {"url": 1, "_id": 0},
+        ):
+            if doc.get("url"):
+                all_urls.append(doc["url"])
+
+    return all_urls
 
 
 async def get_health_stats(platform: str) -> dict:

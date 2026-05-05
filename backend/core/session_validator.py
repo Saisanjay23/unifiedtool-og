@@ -37,6 +37,15 @@ USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
+# Try to use StealthHTTP (curl_cffi) for browser TLS fingerprint impersonation.
+# This prevents platforms from detecting validation requests as non-browser traffic.
+_stealth_http_available = False
+try:
+    from backend.stealth.http_client import StealthHTTP
+    _stealth_http_available = True
+except ImportError:
+    pass
+
 # Platform-specific validation config:
 # url: a page that requires login (redirects to login page if session is dead)
 # check_type: "redirect" (check if response URL contains login path) or "content" (check response body)
@@ -193,46 +202,66 @@ class SessionValidator:
             if name and value:
                 jar.set(name, value, domain=domain, path=path)
 
-        # Make the validation request
+        # Make the validation request using StealthHTTP (curl_cffi) if available,
+        # falling back to plain requests.  StealthHTTP impersonates Chrome's TLS
+        # fingerprint, preventing platforms from detecting this as non-browser traffic
+        # and returning misleading "expired" responses.
         try:
-            resp = req_lib.get(
-                config["url"],
-                cookies=jar,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-            )
-        except req_lib.exceptions.Timeout:
-            logger.debug(f"Validation request timed out for {platform}")
-            return self._result(
-                valid=False,
-                checked_at=now_str,
-                reason="timeout",
-                uncertain=True,
-            )
-        except req_lib.exceptions.ConnectionError:
-            logger.debug(f"Validation connection error for {platform}")
-            return self._result(
-                valid=False,
-                checked_at=now_str,
-                reason="connection_error",
-                uncertain=True,
-            )
+            if _stealth_http_available:
+                client = StealthHTTP(timeout=REQUEST_TIMEOUT)
+                try:
+                    resp = client.get(
+                        config["url"],
+                        cookies=jar,
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            "Accept-Language": "en-US,en;q=0.9",
+                        },
+                        allow_redirects=True,
+                    )
+                finally:
+                    client.close()
+            else:
+                resp = req_lib.get(
+                    config["url"],
+                    cookies=jar,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                    timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
         except Exception as e:
-            logger.debug(f"Validation request failed for {platform}: {e}")
-            return self._result(
-                valid=False,
-                checked_at=now_str,
-                reason="request_error",
-                uncertain=True,
-            )
+            err_name = type(e).__name__
+            if "Timeout" in err_name or "timeout" in str(e).lower():
+                logger.debug(f"Validation request timed out for {platform}")
+                return self._result(
+                    valid=False,
+                    checked_at=now_str,
+                    reason="timeout",
+                    uncertain=True,
+                )
+            elif "Connection" in err_name or "connection" in str(e).lower():
+                logger.debug(f"Validation connection error for {platform}")
+                return self._result(
+                    valid=False,
+                    checked_at=now_str,
+                    reason="connection_error",
+                    uncertain=True,
+                )
+            else:
+                logger.debug(f"Validation request failed for {platform}: {e}")
+                return self._result(
+                    valid=False,
+                    checked_at=now_str,
+                    reason="request_error",
+                    uncertain=True,
+                )
 
         # Check the final URL after redirects
-        final_url = resp.url.lower()
+        final_url = str(resp.url).lower()
         for indicator in config["fail_indicators"]:
             if indicator.lower() in final_url:
                 logger.info(

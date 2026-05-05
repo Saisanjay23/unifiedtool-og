@@ -81,6 +81,7 @@ class FacebookDiscoverer(AbstractDiscoverer):
         from backend.stealth.browser import create_stealth_browser
 
         results = []
+        seen_urls = set()  # Global dedup across all keywords & search types
         graphql_data = {}
         human = HumanBehavior(platform="facebook")
 
@@ -180,6 +181,7 @@ class FacebookDiscoverer(AbstractDiscoverer):
                             progress_callback,
                             len(results),
                             max_results * len(keywords),
+                            seen_urls,
                         )
 
                         logger.info(
@@ -215,14 +217,15 @@ class FacebookDiscoverer(AbstractDiscoverer):
         progress_callback,
         current_total: int,
         max_total: int,
+        seen_urls: set,
     ) -> list[ProfileResult]:
         """
         Isolated DOM Extraction Cycle - REWRITTEN FOR MAXIMUM RESILIENCY.
         Relies on injected JS to extract data in bulk, eliminating fragile Node IPC timeouts.
         Enforces a strict absolute timeout per keyword to guarantee the job NEVER hangs.
+        Uses a shared seen_urls set to prevent duplicates across keywords and search types.
         """
         profiles = []
-        seen_urls = set()
         
         # Absolute hard timeout per keyword (e.g., 5 minutes max)
         keyword_timeout = 300

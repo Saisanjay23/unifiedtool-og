@@ -110,25 +110,40 @@ def parse_date_robust(date_str) -> datetime.datetime | None:
 
 
 def _get_months_ago(date_str: str | None) -> int:
-    """Return how many months ago a DD-MM-YYYY or MM-YYYY date string is."""
+    """Return how many months ago a date string is.
+    Accepts any format that parse_date_robust() can handle (DD-MM-YYYY,
+    ISO, relative, etc.) so risk scoring works across all platforms."""
     if not date_str or str(date_str).lower() in ("nan", "none", "", "no",
                                                    "not available (instagram restricted)",
                                                    "not available (twitter restricted)"):
         return 999
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    # First try the most common DD-MM-YYYY and MM-YYYY formats (fast path)
     try:
         parts = str(date_str).split("-")
         if len(parts) == 2:
             dt = datetime.datetime.strptime(date_str, "%m-%Y").replace(
                 tzinfo=datetime.timezone.utc
             )
-        else:
+            return (now.year - dt.year) * 12 + (now.month - dt.month)
+        elif len(parts) == 3:
             dt = datetime.datetime.strptime(date_str, "%d-%m-%Y").replace(
                 tzinfo=datetime.timezone.utc
             )
-        return (now.year - dt.year) * 12 + (now.month - dt.month)
+            return (now.year - dt.year) * 12 + (now.month - dt.month)
     except Exception:
-        return 999
+        pass
+
+    # Fallback: use the robust parser for any other format (ISO, relative, etc.)
+    dt = parse_date_robust(date_str)
+    if dt:
+        # Make timezone-aware if needed
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return (now.year - dt.year) * 12 + (now.month - dt.month)
+
+    return 999
 
 
 def calculate_risk(result: ProfileResult) -> None:

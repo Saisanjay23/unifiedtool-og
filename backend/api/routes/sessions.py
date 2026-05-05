@@ -272,7 +272,7 @@ async def get_session_status(platform: str):
         session_uncertain = validation.get("uncertain", False)
         if session_uncertain:
             validation_warning = validation.get("reason", "validation_error")
-            logger.warning(
+            logger.debug(
                 f"Session validation uncertain for {platform}: {validation_warning}"
             )
         elif not validation["valid"]:
@@ -282,7 +282,7 @@ async def get_session_status(platform: str):
 
     return {
         "platform": platform,
-        "logged_in": logged_in and not session_expired and not session_uncertain,
+        "logged_in": logged_in and not session_expired,
         "last_login": last_login,
         "age_hours": age_hours,
         "login_in_progress": login_progress.get("in_progress", False),

@@ -25,6 +25,7 @@ google-api-python-client==2.163.0
 # HTTP libraries
 requests==2.32.3
 aiohttp==3.11.10
+curl_cffi==0.7.4
 
 # Scheduling
 APScheduler==3.10.4

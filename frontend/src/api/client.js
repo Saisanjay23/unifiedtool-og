@@ -54,6 +54,8 @@ export const getKeywords = (client, platform) =>
     api.get(`/results/${client}/keywords`, { params: { platform } });
 export const getKnownUrls = (client, platform) =>
     api.get(`/results/${client}/known-urls`, { params: { platform } });
+export const getValidatedUrls = (client, platform) =>
+    api.get(`/results/${client}/validated-urls`, { params: { platform } });
 
 // -- Health --
 export const getHealth = () => api.get('/health');
