@@ -1,518 +1,215 @@
-<![CDATA[<div align="center">
+<p align="center">
+<img src="docs/screenshots/banner.png" alt="Unified Social Media OSINT Tool" width="800">
+</p>
 
-# 🔍 Unified Social Media OSINT Tool v3
+<p align="center">
+<a href="https://python.org"><img src="https://img.shields.io/badge/python-3.11-blue.svg"></a>
+<a href="https://fastapi.tiangolo.com"><img src="https://img.shields.io/badge/fastapi-0.115-009688.svg"></a>
+<a href="https://react.dev"><img src="https://img.shields.io/badge/react-18-61DAFB.svg"></a>
+<a href="https://www.mongodb.com"><img src="https://img.shields.io/badge/mongodb-7.0-47A248.svg"></a>
+<a href="https://playwright.dev"><img src="https://img.shields.io/badge/playwright-1.49-2EAD33.svg"></a>
+</p>
 
-**Enterprise-grade Open Source Intelligence platform for social media profiling across 6 platforms**
-
-[![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
-[![MongoDB](https://img.shields.io/badge/MongoDB-7.0-47A248?logo=mongodb&logoColor=white)](https://mongodb.com)
-[![Playwright](https://img.shields.io/badge/Playwright-1.49-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev)
-[![License](https://img.shields.io/badge/License-Private-red)]()
-
-</div>
-
----
-
-## 📸 Screenshots
-
-<details>
-<summary><b>🖥️ Dashboard — Real-time Intelligence Overview</b></summary>
-
-![Dashboard](docs/screenshots/dashboard.png)
-
-</details>
-
-<details>
-<summary><b>🔎 Discovery — Keyword-Based Profile Search</b></summary>
-
-![Discovery](docs/screenshots/discovery.png)
-
-</details>
-
-<details>
-<summary><b>✅ Validated Profiles — Batch Actions & Export</b></summary>
-
-![Validated](docs/screenshots/validated.png)
-
-</details>
-
-<details>
-<summary><b>🔐 Session Manager — Multi-Platform Auth</b></summary>
-
-![Sessions](docs/screenshots/sessions.png)
-
-</details>
+<p align="center">
+<a href="#installation">Installation</a> · <a href="#features">Features</a> · <a href="#usage">Usage</a> · <a href="#api-reference">API</a> · <a href="#configuration">Config</a> · <a href="docs/ARCHITECTURE.md">Architecture</a>
+</p>
 
 ---
 
-## 🎯 What It Does
+**Unified Social Media Tool** is an OSINT automation platform for discovering, triaging, and analyzing social media profiles across Facebook, Instagram, Twitter/X, YouTube, and Telegram. Built for threat intelligence teams conducting brand impersonation investigations and fraudulent account identification.
 
-The Unified Social Media OSINT Tool automates the discovery, validation, and analysis of social media profiles across **6 major platforms**. It is designed for threat intelligence teams to identify brand impersonation, fraudulent accounts, and unauthorized usage of company names/keywords across social media.
+The tool provides a web-based UI powered by React and a FastAPI backend with Playwright-based stealth browser automation. YouTube and Telegram use their official APIs.
 
-### Supported Platforms
-
-| Platform | Discovery | Analysis | Auth Method |
-|----------|-----------|----------|-------------|
-| 🔵 **Facebook** | ✅ Keyword search | ✅ Full profile scraping | Cookie-based session |
-| 📸 **Instagram** | ✅ Keyword search | ✅ Profile + post data | Cookie-based session |
-| ✖️ **Twitter / X** | ✅ Keyword search | ✅ Profile + metrics | Cookie-based session |
-| 🔴 **YouTube** | ✅ API-powered search | ✅ Channel analytics | YouTube Data API key |
-| ✈️ **Telegram** | ✅ API-powered search | ✅ Channel/group info | Telethon API session |
-| 🎵 **TikTok** | 🚧 Planned | 🚧 Planned | — |
+<p align="center">
+<img src="docs/screenshots/dashboard.png" alt="Dashboard" width="800">
+</p>
 
 ---
 
-## ⚡ Key Features
+## Features
 
-### 🔎 Discovery Engine
-- **Multi-keyword batch search** — Search multiple keywords simultaneously across any platform
-- **Configurable result limits** — Control how many results per keyword (default: 50)
-- **Headless/headed modes** — Run browser scraping in headless mode for speed or headed for debugging
-- **Scrape All mode** — Exhaustive scraping that fetches all available results
-- **Keyword presets** — Save and reuse keyword sets for recurring investigations
+- **Multi-platform discovery** — Keyword-based search across 5 platforms simultaneously
+- **Deep profile analysis** — Extract followers, bio, location, creation date, last activity, verification status
+- **Three-state triage** — Pending → Approved / Rejected workflow with bulk operations
+- **Batch URL export** — Copy or analyze ALL validated URLs from the entire database, not just the current page
+- **Real-time monitoring** — WebSocket-powered live progress during analysis, per-platform health scores
+- **Stealth automation** — Browser fingerprint randomization, human behavior simulation, TLS-fingerprinted HTTP
+- **Session persistence** — Cookie-based auth that survives restarts, with automatic health validation
+- **Concurrent scraping** — 3 browser tabs or 6 API workers running in parallel
+- **Excel export** — One-click `.xlsx` export with full profile metadata
+- **Cron scheduling** — Automated recurring discovery and analysis jobs
+- **Multi-client** — Isolated databases per client for clean data separation
 
-### 🧠 Profile Analysis
-- **Deep profile extraction** — Followers, following, posts, bio, location, creation date, verification status
-- **Activity timeline** — Last post date to gauge account activity
-- **Concurrent analysis** — Analyze 3 browser-based profiles or 6 API-based profiles simultaneously
-- **Real-time progress** — WebSocket-powered live progress feed during analysis
+### Platform Support
 
-### ✅ Validation Workflow
-- **Three-state triage** — Pending → Validated (Approved) / Rejected
-- **Bulk operations** — Validate All, Reject All with one click
-- **Confidence scoring** — HIGH / MEDIUM / LOW confidence badges
-- **Age detection** — NEW / OLD badges based on profile creation date
-
-### 📋 Batch Operations
-- **Copy ALL Validated URLs** — Fetches ALL validated URLs from the database (not limited to current page)
-- **Analyze ALL Validated** — Send all validated profiles to analysis in one click
-- **Select & Analyze** — Cherry-pick specific profiles for targeted analysis
-- **Excel Export** — Export results with full metadata to `.xlsx`
-
-### 🛡️ Stealth & Anti-Detection
-- **Browser fingerprint randomization** — Canvas, WebGL, fonts, navigator spoofing
-- **Human behavior simulation** — Random delays, mouse movements, scroll patterns
-- **Session persistence** — Cookie-based authentication survives browser restarts
-- **Rate limiting** — Per-platform hourly rate limits to avoid bans
-- **Stealth HTTP client** — `curl_cffi` with TLS fingerprint impersonation for API calls
-- **Resource blocklist** — Blocks tracking pixels, analytics, and heavy media to speed up scraping
-
-### 📊 Dashboard & Monitoring
-- **Real-time health rings** — Per-platform health scores (Healthy/Degraded/Critical)
-- **Session status tracking** — Live session age, active/inactive indicators
-- **Job monitoring** — Active jobs, completed count, total jobs
-- **WebSocket live feed** — Real-time analysis progress without polling
-
-### 🔄 Automation
-- **Cron scheduling** — Automated recurring discovery/analysis jobs via `cron_jobs.json`
-- **Background job queue** — Non-blocking job execution with cleanup
+| Platform | Discovery | Analysis | Auth |
+|:---------|:----------|:---------|:-----|
+| Facebook | Keyword search | Full profile | Cookie session |
+| Instagram | Keyword search | Profile + posts | Cookie session |
+| Twitter/X | Keyword search | Profile + metrics | Cookie session |
+| YouTube | API search | Channel analytics | API key |
+| Telegram | API search | Channel/group info | Telethon session |
 
 ---
 
-## 🏗️ Architecture
+## Installation
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    React Frontend (Vite)                  │
-│  Dashboard │ PlatformView │ ResultsGrid │ SessionLogin   │
-└───────────────────────┬─────────────────────────────────┘
-                        │ HTTP / WebSocket
-┌───────────────────────▼─────────────────────────────────┐
-│               FastAPI Backend (Uvicorn)                   │
-│                                                          │
-│  ┌─────────┐  ┌──────────┐  ┌────────────┐  ┌────────┐ │
-│  │ Routes  │  │WebSocket │  │ Job Manager│  │ Health │ │
-│  │ API     │  │ Progress │  │ + Pool     │  │ Writer │ │
-│  └────┬────┘  └────┬─────┘  └─────┬──────┘  └────┬───┘ │
-│       │            │              │               │      │
-│  ┌────▼────────────▼──────────────▼───────────────▼───┐ │
-│  │              Platform Modules                      │ │
-│  │  Facebook │ Instagram │ Twitter │ YouTube│Telegram │ │
-│  │  (Playwright)  (Playwright) (Playwright) (API)  (API)│ │
-│  └────────────────────┬───────────────────────────────┘ │
-│                       │                                  │
-│  ┌────────────────────▼───────────────────────────────┐ │
-│  │           Stealth Layer                            │ │
-│  │  Browser Pool │ Fingerprint │ Human │ HTTP Client  │ │
-│  └────────────────────────────────────────────────────┘ │
-└───────────────────────┬─────────────────────────────────┘
-                        │
-                ┌───────▼───────┐
-                │   MongoDB     │
-                │  (per-client  │
-                │   databases)  │
-                └───────────────┘
-```
+Requires **Python 3.10+**, **Node.js 18+**, **MongoDB 6.0+**.
 
-### Repository Layout
-
-```text
-unifiedtool-og/
-├── home.py                 # Main entrypoint (server, build, login, cron)
-├── requirements.txt        # Python dependencies
-├── .env.example            # Environment configuration template
-├── cron_jobs.json          # Scheduled job definitions
-│
-├── backend/
-│   ├── api/
-│   │   ├── router.py       # FastAPI app factory + static file serving
-│   │   ├── websocket.py    # WebSocket progress stream
-│   │   └── routes/
-│   │       ├── discovery.py    # POST /discover/{platform}
-│   │       ├── analysis.py     # POST /analyze/{platform}
-│   │       ├── results.py      # GET/PATCH results, validated-urls
-│   │       ├── sessions.py     # Session management endpoints
-│   │       ├── health.py       # GET /health
-│   │       ├── clients.py      # Client CRUD
-│   │       └── export.py       # Excel export
-│   │
-│   ├── core/
-│   │   ├── config.py           # Pydantic settings from .env
-│   │   ├── db.py               # MongoDB operations (motor async)
-│   │   ├── jobs.py             # JobManager + BrowserPool orchestration
-│   │   ├── health.py           # Platform health scoring engine
-│   │   ├── session_validator.py # Cross-platform session validation
-│   │   ├── cron.py             # APScheduler integration
-│   │   ├── logger.py           # Structured logging
-│   │   ├── runtime.py          # Python version enforcement
-│   │   └── fs.py               # Filesystem helpers
-│   │
-│   ├── platforms/
-│   │   ├── base.py             # Abstract base platform class
-│   │   ├── utils.py            # Shared scraping utilities
-│   │   ├── facebook/           # Discovery + Analysis
-│   │   ├── instagram/          # Discovery + Analysis
-│   │   ├── twitter/            # Discovery + Analysis
-│   │   ├── youtube/            # Discovery + Analysis (API)
-│   │   ├── telegram/           # Discovery + Analysis (API)
-│   │   └── tiktok/             # Planned
-│   │
-│   └── stealth/
-│       ├── browser.py          # Playwright browser manager + session loader
-│       ├── browser_pool.py     # Concurrent browser tab pool
-│       ├── fingerprint.py      # Canvas/WebGL/Navigator fingerprint spoofing
-│       ├── human.py            # Human behavior simulation
-│       ├── headers.py          # Randomized HTTP headers
-│       ├── http_client.py      # curl_cffi stealth HTTP client
-│       ├── blocklist.py        # Resource blocking (ads, trackers)
-│       └── proxy.py            # Proxy rotation support
-│
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx             # Root app with routing
-│   │   ├── main.jsx            # React entry point
-│   │   ├── api/client.js       # Axios API client
-│   │   ├── store/              # State management
-│   │   ├── components/
-│   │   │   ├── Dashboard.jsx       # Intelligence overview
-│   │   │   ├── PlatformView.jsx    # Discovery + Analysis tabs
-│   │   │   ├── ResultsGrid.jsx     # Profile cards grid
-│   │   │   ├── AnalysisPanel.jsx   # Analysis launcher
-│   │   │   ├── AnalysisResultsGrid.jsx  # Analysis results
-│   │   │   ├── SessionLogin.jsx    # Session management UI
-│   │   │   ├── JobMonitor.jsx      # Real-time job tracking
-│   │   │   ├── HealthRing.jsx      # SVG health ring component
-│   │   │   ├── ClientManager.jsx   # Client CRUD
-│   │   │   ├── KeywordPresets.jsx   # Keyword preset manager
-│   │   │   ├── CronManager.jsx     # Cron job UI
-│   │   │   ├── PlatformIcon.jsx    # Platform icon renderer
-│   │   │   ├── Toast.jsx           # Notification system
-│   │   │   └── ErrorBoundary.jsx   # React error boundary
-│   │   └── styles/
-│   │       └── theme.css           # Complete design system
-│   └── dist/                   # Production build output (git-ignored)
-│
-├── docs/
-│   ├── ARCHITECTURE.md         # Technical architecture notes
-│   ├── OPERATIONS.md           # Operations & troubleshooting
-│   └── screenshots/            # UI screenshots
-│
-├── sessions/                   # Platform session cookies (git-ignored)
-└── logs/                       # Application logs (git-ignored)
-```
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| **Python** | 3.10 – 3.14 | 3.11 recommended |
-| **Node.js** | 18+ | For frontend build |
-| **MongoDB** | 6.0+ | Local or Atlas |
-| **Chromium** | Latest | Installed via Playwright |
-
-### Installation
-
-```powershell
-# 1. Clone the repository
+```bash
 git clone https://github.com/Saisanjay23/unifiedtool-og.git
 cd unifiedtool-og
-
-# 2. Create Python virtual environment
 python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # macOS/Linux
-
-# 3. Install Python dependencies
+venv\Scripts\activate
 pip install -r requirements.txt
-
-# 4. Install Playwright browser
 playwright install chromium
-
-# 5. Configure environment
-copy .env.example .env
-# Edit .env with your MongoDB URI, API keys, etc.
-
-# 6. Build frontend
+cp .env.example .env    # edit with your MongoDB URI and API keys
 python home.py --build
-
-# 7. Start the server
 python home.py
 ```
 
-Open **http://localhost:9000** in your browser.
-
-### First-Time Setup
-
-1. **Create a client** — Click `+ New` in the sidebar and enter a client name (e.g., `cyfirma`)
-2. **Login to platforms** — Go to `Sessions` → click `Login` on each platform → authenticate in the browser window that opens
-3. **Start discovering** — Select a platform → enter keywords → click `Start Discovery`
-4. **Triage results** — Review discovered profiles → `Validate` or `Reject` each one
-5. **Analyze validated** — Switch to `Validated` tab → click `Analyze ALL Validated`
+Open `http://localhost:9000`.
 
 ---
 
-## ⚙️ Configuration
+## Usage
 
-Create `.env` from `.env.example`. Key settings:
+### Getting Started
 
-### Server
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `9000` | Server port |
-| `DEBUG` | `false` | Debug mode |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
+1. Create a client from the sidebar (`+ New`)
+2. Go to **Sessions** and log in to each platform
+3. Select a platform → enter keywords → **Start Discovery**
+4. Review results → **Validate** or **Reject** profiles
+5. Switch to **Validated** tab → **Analyze ALL Validated**
 
-### Database
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string |
-| `MONGO_DB_PREFIX` | `unified_tool` | Database name prefix |
+### CLI
 
-### Platform APIs
-| Variable | Description |
-|----------|-------------|
-| `YOUTUBE_API_KEY` | YouTube Data API v3 key |
-| `TELEGRAM_API_ID` | Telegram API application ID |
-| `TELEGRAM_API_HASH` | Telegram API application hash |
-| `TELEGRAM_PHONE` | Phone number for Telegram auth |
+```bash
+python home.py                    # start server on port 9000
+python home.py --port 8080        # custom port
+python home.py --build            # rebuild React frontend
+python home.py --login facebook   # interactive browser login
+python home.py --cron             # start cron scheduler
+```
 
-### Performance Tuning
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MAX_CONCURRENT_PROFILES` | `3` | Max profiles scraped in parallel |
-| `MAX_CONCURRENT_JOBS` | `5` | Max background jobs |
-| `ANALYSIS_CONCURRENT_TABS` | `3` | Browser tabs for analysis |
-| `ANALYSIS_API_CONCURRENT_TABS` | `6` | API-based analysis concurrency |
-| `ANALYSIS_INTER_PROFILE_DELAY` | `1.5` | Delay between profiles (seconds) |
+### Screenshots
 
-### Rate Limits
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RATE_LIMIT_FACEBOOK` | `30` | Max requests/hour |
-| `RATE_LIMIT_INSTAGRAM` | `60` | Max requests/hour |
-| `RATE_LIMIT_TWITTER` | `40` | Max requests/hour |
-| `RATE_LIMIT_YOUTUBE` | `100` | Max requests/hour |
-| `RATE_LIMIT_TELEGRAM` | `80` | Max requests/hour |
+<table>
+<tr>
+<td><img src="docs/screenshots/discovery.png" alt="Discovery" width="400"></td>
+<td><img src="docs/screenshots/validated.png" alt="Validated" width="400"></td>
+</tr>
+<tr>
+<td align="center"><b>Discovery</b> — Keyword search with results grid</td>
+<td align="center"><b>Validated</b> — Batch actions and profile cards</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/sessions.png" alt="Sessions" width="400"></td>
+<td><img src="docs/screenshots/dashboard.png" alt="Dashboard" width="400"></td>
+</tr>
+<tr>
+<td align="center"><b>Sessions</b> — Multi-platform authentication</td>
+<td align="center"><b>Dashboard</b> — Health rings and job stats</td>
+</tr>
+</table>
 
 ---
 
-## 🖥️ CLI Commands
+## API Reference
 
-```powershell
-# Start the server (default port 9000)
-python home.py
-
-# Start on a custom port
-python home.py --port 8080
-
-# Build the React frontend
-python home.py --build
-
-# Interactive browser login for a platform
-python home.py --login facebook
-python home.py --login instagram
-python home.py --login twitter
-
-# Run cron scheduler
-python home.py --cron
-```
+| Method | Endpoint | Description |
+|:-------|:---------|:------------|
+| `POST` | `/discover/{platform}` | Start keyword discovery |
+| `POST` | `/analyze/{platform}` | Start profile analysis |
+| `GET` | `/results/{client}` | Paginated results with filters |
+| `GET` | `/results/{client}/validated-urls` | All validated URLs (no pagination) |
+| `PATCH` | `/results/{client}/{id}` | Update profile status |
+| `GET` | `/export/{client}` | Download Excel report |
+| `GET` | `/sessions` | List session status |
+| `POST` | `/sessions/{platform}/validate` | Validate a session |
+| `GET` | `/health` | Platform health scores |
+| `WS` | `/ws/progress/{job_id}` | Live analysis progress |
 
 ---
 
-## 🔌 API Reference
+## Configuration
 
-### Discovery
-```
-POST /discover/{platform}
-Body: { "keywords": ["keyword1", "keyword2"], "max_results": 50, "headless": true }
-```
+Copy `.env.example` to `.env`. Key variables:
 
-### Analysis
-```
-POST /analyze/{platform}
-Body: { "urls": ["https://facebook.com/profile1", ...] }
-```
+```ini
+# Database
+MONGO_URI=mongodb://localhost:27017
 
-### Results
-```
-GET  /results/{client}?platform=facebook&status=approved&limit=20&offset=0
-GET  /results/{client}/validated-urls?platform=facebook
-PATCH /results/{client}/{profile_id}    Body: { "status": "approved" }
-```
+# Platform APIs (YouTube + Telegram only)
+YOUTUBE_API_KEY=
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+TELEGRAM_PHONE=
 
-### Sessions
-```
-GET  /sessions
-POST /sessions/{platform}/validate
-POST /sessions/{platform}/login
-```
+# Performance
+ANALYSIS_CONCURRENT_TABS=3          # browser-based platforms
+ANALYSIS_API_CONCURRENT_TABS=6      # API-based platforms
+MAX_CONCURRENT_PROFILES=3
 
-### Health
-```
-GET /health
+# Rate limits (requests/hour)
+RATE_LIMIT_FACEBOOK=30
+RATE_LIMIT_INSTAGRAM=60
+RATE_LIMIT_TWITTER=40
+RATE_LIMIT_YOUTUBE=100
+RATE_LIMIT_TELEGRAM=80
 ```
 
-### Export
-```
-GET /export/{client}?platform=facebook&status=approved
-```
-
-### WebSocket
-```
-WS /ws/progress/{job_id}
-```
+See [`.env.example`](.env.example) for the full list.
 
 ---
 
-## 🗄️ Data Model
+## Project Structure
 
-Each discovered profile is stored in MongoDB with the following schema:
-
-```json
-{
-  "_id": "ObjectId",
-  "url": "https://facebook.com/profile",
-  "display_name": "John Doe",
-  "username": "johndoe",
-  "platform": "facebook",
-  "entity_type": "Person",
-  "bio": "Software developer...",
-  "followers": 1250,
-  "following": 340,
-  "posts_count": 89,
-  "location": "Mumbai, India",
-  "is_verified": false,
-  "created_at": "2020-01-15",
-  "last_post_date": "2025-12-01",
-  "profile_image_url": "https://...",
-  "confidence": "HIGH",
-  "status": "pending",
-  "keyword": "cyfirma",
-  "keywords": ["cyfirma", "cyber security"],
-  "discovered_at": "2026-05-05T08:30:00Z",
-  "analyzed_at": null
-}
+```
+backend/
+  api/            FastAPI routes, WebSocket progress stream
+  core/           Config, MongoDB, job manager, health engine, session validator
+  platforms/      Per-platform discovery + analysis (Facebook, Instagram, Twitter, YouTube, Telegram)
+  stealth/        Browser pool, fingerprint spoofing, human simulation, stealth HTTP
+frontend/
+  src/            React 18 SPA (Dashboard, PlatformView, ResultsGrid, SessionLogin)
+  dist/           Production build (git-ignored)
+home.py           Entrypoint — server, build, login, cron
 ```
 
-**Status values:** `pending` → `approved` / `rejected`
-
-**Confidence levels:** `HIGH` / `MEDIUM` / `LOW`
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical breakdown.
 
 ---
 
-## 🔒 Security Notes
+## Troubleshooting
 
-- **`.env`** — Contains credentials. Never commit to git.
-- **`sessions/`** — Contains platform auth cookies. Never commit.
-- **Session validation** — Automatic health checks verify session validity before scraping.
-- **Stealth mode** — Browser fingerprints are randomized per session to avoid detection.
-- **No data exfiltration** — All data stays in your local MongoDB instance.
+| Problem | Fix |
+|:--------|:----|
+| Port in use | `netstat -ano \| findstr :9000` → `taskkill /PID <pid> /F` |
+| Session expired | Re-login via Sessions page or `python home.py --login <platform>` |
+| MongoDB error | Ensure `mongod` is running |
+| Frontend stale | `python home.py --build` then hard-refresh (`Ctrl+Shift+R`) |
+| Rate limited | Wait for hourly reset or lower `RATE_LIMIT_*` in `.env` |
 
----
-
-## 🐛 Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| **Port already in use** | Kill the existing process: `netstat -ano \| findstr :9000` then `taskkill /PID <pid> /F` |
-| **Session expired** | Re-login via `Sessions` page or `python home.py --login <platform>` |
-| **MongoDB connection error** | Ensure MongoDB is running: `mongod --dbpath <path>` |
-| **Playwright not installed** | Run `playwright install chromium` |
-| **Frontend not loading** | Rebuild: `python home.py --build` |
-| **Rate limited** | Wait for the hourly window to reset, or lower `RATE_LIMIT_*` values |
-| **"Copy ALL" shows wrong count** | Hard refresh browser (`Ctrl+Shift+R`) to load latest JS bundle |
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for more.
 
 ---
 
-## 📦 Tech Stack
+## Tech Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Backend** | FastAPI + Uvicorn | Async REST API + WebSocket |
-| **Frontend** | React 18 + Vite | SPA with real-time updates |
-| **Database** | MongoDB + Motor | Async document storage |
-| **Browser** | Playwright | Stealth browser automation |
-| **Telegram** | Telethon | Telegram MTProto API |
-| **YouTube** | Google API Client | YouTube Data API v3 |
-| **HTTP** | curl_cffi + aiohttp | TLS-fingerprinted requests |
-| **Scheduling** | APScheduler | Cron-style job scheduling |
-| **Export** | Pandas + openpyxl | Excel report generation |
-
----
-
-## 📝 Changelog
-
-### v3.0 — May 2026
-- ✅ Fixed batch operations (Copy/Analyze ALL) fetching all URLs from database instead of page-limited 20
-- ✅ Consistent card layout across all platforms with pinned footer actions
-- ✅ Keyword truncation in profile cards (max 2 + count badge)
-- ✅ Stealth HTTP client with TLS fingerprint impersonation
-- ✅ Resource blocklist for faster scraping
-- ✅ Health scoring engine with degradation thresholds
-
-### v2.0 — April 2026
-- ✅ FastAPI migration from Streamlit monolith
-- ✅ React SPA frontend with dark mode design
-- ✅ WebSocket real-time progress
-- ✅ Multi-client support with per-client databases
-- ✅ Concurrent analysis with browser pool
-- ✅ Session persistence and validation
-
-### v1.0 — March 2026
-- ✅ Initial Streamlit-based OSINT tool
-- ✅ Facebook, Instagram, Twitter discovery
-- ✅ Basic profile analysis
+| Component | Technology |
+|:----------|:-----------|
+| Backend | FastAPI, Uvicorn, Motor (async MongoDB) |
+| Frontend | React 18, Vite |
+| Browser | Playwright with stealth fingerprinting |
+| HTTP | curl_cffi (TLS impersonation), aiohttp |
+| Telegram | Telethon (MTProto) |
+| YouTube | Google API Python Client |
+| Scheduling | APScheduler |
+| Export | Pandas, openpyxl |
 
 ---
 
-## 📄 Additional Documentation
-
-- [`SETUP.md`](SETUP.md) — Detailed laptop setup guide
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Codebase structure and runtime flow
-- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — Production hygiene and troubleshooting
-
----
-
-<div align="center">
-
-**Built for threat intelligence. Designed for speed.**
-
-</div>
-]]>
+<p align="center">
+<sub>Built for threat intelligence. Designed for speed.</sub>
+</p>
