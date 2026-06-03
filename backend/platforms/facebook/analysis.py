@@ -28,7 +28,6 @@ from backend.platforms.utils import (
 from backend.platforms.utils import (
     parse_followers as _parse_followers,
 )
-from backend.stealth.human import HumanBehavior
 
 logger = get_logger("platforms.facebook.analysis")
 
@@ -229,8 +228,26 @@ BULK_EXTRACTION_JS = r"""
             if (blocklist.some(b => href.includes(b))) continue;
             try {
                 const box = img.getBoundingClientRect();
-                if (box.width >= 100 && box.y > 60) {
+                // y > 50 ignores navbar, y < 350 ensures it's in the header,
+                // width between 100 and 220 excludes cover photos and post images
+                if (box.width >= 100 && box.width <= 220 && box.y > 50 && box.y < 350) {
                     result.svg_images.push(href.replace(/&amp;/g, '&'));
+                }
+            } catch(e) {}
+        }
+
+        // 6b. Standard img tags fallback (for classic Pages)
+        const standardImgs = document.querySelectorAll('img');
+        for (const img of Array.from(standardImgs).slice(0, 50)) {
+            const src = img.getAttribute('src') || '';
+            if (!src || !src.includes('scontent') || !src.includes('http')) continue;
+            const blocklist = ['static.xx', 'rsrc.php', 'silhouette', 'emoji', 'guest', 'default_profile'];
+            if (blocklist.some(b => src.includes(b))) continue;
+            try {
+                const box = img.getBoundingClientRect();
+                // Same constraints to avoid grabbing cover photo/post images
+                if (box.width >= 100 && box.width <= 220 && box.y > 50 && box.y < 350) {
+                    result.svg_images.push(src.replace(/&amp;/g, '&'));
                 }
             } catch(e) {}
         }
@@ -297,12 +314,12 @@ BULK_EXTRACTION_JS = r"""
 """
 
 
-async def _download_profile_image_fast(image_url: str) -> str | None:
-    """Download profile image using requests (in thread) instead of browser tab."""
+async def _download_profile_image_fast(image_url: str) -> tuple[str | None, int]:
+    """Download profile image. Returns (b64_data, content_length)."""
     if not image_url or "http" not in image_url:
-        return None
+        return None, 0
     if image_url.startswith("data:") or len(image_url) < 10:
-        return None
+        return None, 0
 
     import requests as req_lib
 
@@ -323,11 +340,92 @@ async def _download_profile_image_fast(image_url: str) -> str | None:
             )
         )
         if img_resp.status_code == 200 and len(img_resp.content) > 500:
-            return base64.b64encode(img_resp.content).decode("utf-8")
+            return base64.b64encode(img_resp.content).decode("utf-8"), len(img_resp.content)
     except Exception as e:
         logger.debug(f"Image download failed: {e}")
 
+    return None, 0
+
+
+async def _check_is_silhouette_via_graph(username: str) -> bool | None:
+    """
+    Use Facebook Graph API to check if a profile uses a default silhouette/avatar.
+    Returns True if silhouette (default), False if real picture, None if API fails.
+    URL: https://graph.facebook.com/{username}/picture?redirect=false
+    """
+    if not username:
+        return None
+
+    import requests as req_lib
+
+    try:
+        api_url = f"https://graph.facebook.com/{username}/picture?redirect=false"
+        resp = await asyncio.to_thread(
+            lambda: req_lib.get(
+                api_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                },
+                timeout=5,
+            )
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if "data" in data and "is_silhouette" in data["data"]:
+                is_sil = data["data"]["is_silhouette"]
+                logger.info(f"Graph API is_silhouette={is_sil} for {username}")
+                return is_sil
+    except Exception as e:
+        logger.debug(f"Graph API silhouette check failed for {username}: {e}")
+
     return None
+
+
+def _is_default_facebook_avatar(image_url: str) -> bool:
+    """
+    Detect Facebook default avatars using URL patterns ONLY.
+    
+    Facebook default avatars have these telltale signs in their CDN URLs:
+    1. CDN path contains 't1.30497-1' (default avatar type code)
+    2. CDN path contains 't39.30497-1' (another default variant) 
+    3. Known default silhouette image IDs
+    
+    NOTE: We do NOT use byte size — small company logos are legitimate.
+    """
+    url_lower = (image_url or "").lower()
+    
+    if not url_lower:
+        return False
+    
+    # Pattern 1: Facebook default avatar CDN type codes and generic page logos
+    DEFAULT_TYPE_CODES = [
+        "t1.30497-1",       # Classic silhouette (personal profiles)
+        "t39.30497-1",      # Modern silhouette variant
+        "fb_icon_325x325",  # Page with no profile picture (fallback)
+        "images/fb_icon",   # Generic Facebook logo
+        "facebook_logo"     # Generic Facebook logo
+    ]
+    for code in DEFAULT_TYPE_CODES:
+        if code in url_lower:
+            logger.info(f"Default avatar detected (CDN type code '{code}') for {image_url[:80]}")
+            return True
+    
+    # Pattern 2: Known Facebook default silhouette image IDs
+    KNOWN_DEFAULT_IDS = [
+        "84628273_176159830277856_972693363922829312",   # Standard silhouette  
+        "84241059_176159830277856_972693363922829312",   # Alt silhouette
+        "1543545_10150004552801849",                      # Legacy default
+        "10150004552801849",                              # Short legacy default
+        "default_profile",
+        "silhouette",
+        "guest"
+    ]
+    for img_id in KNOWN_DEFAULT_IDS:
+        if img_id in url_lower:
+            logger.info(f"Default avatar detected (known ID '{img_id}') for {image_url[:80]}")
+            return True
+    
+    return False
 
 
 def _upgrade_image_url(url: str) -> str:
@@ -349,11 +447,10 @@ def _is_valid_pfp(url):
     """Check if a URL is a valid profile picture (not a placeholder)."""
     if not url or "http" not in url or "emoji" in url:
         return False
-    blocklist = [
-        "static.xx", "rsrc.php", "silhouette", "guest",
-        "default_profile", "avatar_empty", "blank_profile", "1x1",
-    ]
-    return not any(x in url for x in blocklist)
+    # Facebook CDN URLs frequently contain broad strings that the shared
+    # cross-platform detector treats as suspicious. For Facebook analysis, use
+    # the narrower Facebook-specific default-avatar patterns instead.
+    return not _is_default_facebook_avatar(url)
 
 
 def _extract_timestamps_unified(
@@ -502,7 +599,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
         logger.info(f"Analyzing: {url}")
 
         # ── Network interception (passive, zero overhead) ──────────────
-        captured_network = {"followers": 0, "page_created": None, "joined": None, "joined_text": None}
+        captured_network = {"followers": 0, "page_created": None, "joined": None, "joined_text": None, "profile_id": None}
 
         async def _intercept_response(response):
             try:
@@ -547,6 +644,14 @@ class FacebookAnalyzer(AbstractAnalyzer):
                         if jd_match and not captured_network["joined"]:
                             captured_network["joined"] = int(jd_match.group(1))
                             break
+
+                    # Extract numeric profile/page ID for Graph API check
+                    if not captured_network["profile_id"]:
+                        for id_pat in [r'"pageID":"(\d+)"', r'"userID":"(\d+)"', r'"entity_id":"(\d+)"']:
+                            id_match = re.search(id_pat, text)
+                            if id_match:
+                                captured_network["profile_id"] = id_match.group(1)
+                                break
             except:
                 pass
 
@@ -571,12 +676,11 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     wait_until="domcontentloaded",
                     timeout=settings.ANALYSIS_PAGE_TIMEOUT_MS,
                 )
-                # Minimal anti-bot jitter (reduced from 0.5-1.0s)
-                await asyncio.sleep(random.uniform(0.3, 0.6))
-                await HumanBehavior(platform="facebook").mouse_jitter(page, count=1)
+                # Minimal anti-bot jitter — keep fast like standalone script
+                await asyncio.sleep(random.uniform(0.1, 0.3))
 
                 try:
-                    await page.wait_for_selector("h1", timeout=5000)
+                    await page.wait_for_selector("h1", timeout=2000)
                 except:
                     if "login" in page.url:
                         error_comments.append("Redirected to Login")
@@ -669,40 +773,51 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
             # ── 6. PROFILE PICTURE URL ───────────────────────────────
             profile_picture_url = ""
+            has_logo = False
 
             svg_images = bulk_data.get("svg_images", [])
             og_image = bulk_data.get("og_image", "")
             json_ld_image = bulk_data.get("json_ld_image", "")
 
+            # Collect the best candidate URL (SVG first, then og:image fallback)
             for candidate_url in svg_images:
                 if _is_valid_pfp(candidate_url):
                     profile_picture_url = _upgrade_image_url(candidate_url)
                     break
 
-            if not profile_picture_url and _is_valid_pfp(og_image):
-                profile_picture_url = _upgrade_image_url(og_image)
+            if not profile_picture_url:
+                for fallback_url in [og_image, json_ld_image]:
+                    if fallback_url and "http" in fallback_url:
+                        profile_picture_url = _upgrade_image_url(fallback_url)
+                        break
 
-            if not profile_picture_url and _is_valid_pfp(json_ld_image):
-                profile_picture_url = _upgrade_image_url(json_ld_image)
-
-            has_logo = bool(profile_picture_url)
+            # Diagnostic: log the DOM-extracted URL and its CDN type code
+            if profile_picture_url:
+                cdn_type = "t39.30808 (user-uploaded)" if "t39.30808" in profile_picture_url else "other (system/generated)"
+                logger.info(f"DOM-extracted PFP URL [{cdn_type}]: {profile_picture_url[:120]} for {url}")
+            else:
+                logger.info(f"DOM-extracted PFP URL: NONE for {url}")
 
             # ── 7. SCREENSHOT (must complete before navigating away) ──
-            # Playwright pages are NOT safe for concurrent operations.
-            # Screenshot must be awaited here, while we're still on the profile page.
             screenshot_bytes = await self._take_screenshot(page)
 
-            # Start image download in background (uses requests, not the page)
+            # Download profile image + check Graph API concurrently
             image_task = asyncio.create_task(
                 _download_profile_image_fast(profile_picture_url)
             ) if profile_picture_url else None
+
+            # Use numeric profile ID (from network intercept) for Graph API — vanity URLs don't work
+            graph_id = captured_network.get("profile_id") or self._extract_username(url) or ""
+            graph_task = asyncio.create_task(
+                _check_is_silhouette_via_graph(graph_id)
+            ) if graph_id else None
 
             # ── 8. FULL PAGE SOURCE for timestamps ───────────────────
             # The JS eval only scans first 300KB but Facebook pages are 2-5MB.
             # Post timestamps (publish_time, creation_time) are deeper in the DOM.
             # This is needed for accurate last-post-date and creation-date detection.
             try:
-                page_source = await asyncio.wait_for(page.content(), timeout=5.0)
+                page_source = await asyncio.wait_for(page.content(), timeout=3.0)
             except Exception:
                 page_source = ""
 
@@ -727,7 +842,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
             # keywords like "Joined", "Page created", "Founded". Do NOT grab random
             # dates from post content — those produce incorrect creation dates.
             try:
-                inner_text = await asyncio.wait_for(page.evaluate("() => document.body.innerText"), timeout=3.0)
+                inner_text = await asyncio.wait_for(page.evaluate("() => document.body.innerText"), timeout=2.0)
                 
                 # Targeted patterns — only match dates after creation keywords
                 for pat in [
@@ -752,28 +867,112 @@ class FacebookAnalyzer(AbstractAnalyzer):
             )
 
             if not last_post_date:
-                fallback_last_post = await self._try_profile_feed_last_post_date(page)
-                if fallback_last_post:
-                    last_post_date = fallback_last_post
-                    try:
-                        fallback_dt = datetime.datetime.strptime(last_post_date, "%d-%m-%Y")
-                        is_active = (datetime.datetime.now() - fallback_dt).days <= 180
-                    except Exception:
-                        pass
+                try:
+                    fallback_last_post = await asyncio.wait_for(
+                        self._try_profile_feed_last_post_date(page), timeout=5.0
+                    )
+                    if fallback_last_post:
+                        last_post_date = fallback_last_post
+                        try:
+                            fallback_dt = datetime.datetime.strptime(last_post_date, "%d-%m-%Y")
+                            is_active = (datetime.datetime.now() - fallback_dt).days <= 180
+                        except Exception:
+                            pass
+                except asyncio.TimeoutError:
+                    logger.debug(f"Profile feed fallback timed out for {url}")
 
-            # ── 9. DEEP DATE STRATEGIES (only if not found yet) ──────
-            # Strategy 1: Transparency page (only if no date found)
+            # ── 8.6. TRY TRANSPARENCY MODAL FIRST (Zero-navigation path) ──
             if not found_date:
-                found_date = await self._try_transparency_page(page, url)
+                try:
+                    found_modal_date = await asyncio.wait_for(
+                        self._try_name_header_click(page), timeout=5.0
+                    )
+                    if found_modal_date:
+                        found_date = found_modal_date
+                except Exception as e:
+                    logger.debug(f"Name header click extraction failed: {e}")
 
-            # Strategy 2: About page (only if still no date found)
             if not found_date:
-                found_date = await self._try_about_page(page, url)
+                try:
+                    found_modal_date = await asyncio.wait_for(
+                        self._try_transparency_modal(page), timeout=5.0
+                    )
+                    if found_modal_date:
+                        found_date = found_modal_date
+                except Exception as e:
+                    logger.debug(f"Transparency modal extraction failed: {e}")
+
+            # ── 9. DEEP DATE STRATEGY: About page (only if not found yet) ──
+            if not found_date:
+                try:
+                    found_date = await asyncio.wait_for(
+                        self._try_about_page(page, url), timeout=8.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(f"About page date lookup timed out for {url}")
 
             created_date = found_date or "Not Available (Restricted)"
 
-            # ── 10. AWAIT IMAGE DOWNLOAD ─────────────────────────────
-            profile_picture_b64 = await image_task if image_task else None
+            # ── 10. AWAIT IMAGE DOWNLOAD + VALIDATE LOGO ─────────────
+            profile_picture_b64 = None
+            img_content_length = 0
+
+            if image_task:
+                img_result = await image_task
+                if img_result:
+                    profile_picture_b64, img_content_length = img_result
+
+            # Await Graph API silhouette check
+            is_silhouette = None
+            if graph_task:
+                try:
+                    is_silhouette = await graph_task
+                except Exception:
+                    is_silhouette = None
+
+            # ── LOGO DECISION ─────────────────────────────────────────────
+            # Facebook serves monograms (grey square with an initial) from the same
+            # t39.30808 user-content CDN folder as real profile pictures.
+            # However, monograms are tiny PNGs (typically 1.9KB - 2.5KB).
+            # Real user-uploaded photos (even simple logos) are much larger (>5KB).
+            #
+            # If Graph API says `is_silhouette=True`, it could mean:
+            # 1. It's a real monogram (file size < 3000 bytes)
+            # 2. Graph API is restricting anonymous access to a real photo (file size > 3000 bytes)
+            is_default_url = _is_default_facebook_avatar(profile_picture_url)
+            is_user_content = bool(profile_picture_url) and "t39.30808" in profile_picture_url
+
+            if not profile_picture_url:
+                has_logo = False
+                logger.info(f"Logo=No (no profile image URL extracted; monogram/placeholder) for {url}")
+            elif is_default_url:
+                has_logo = False
+                logger.info(f"Logo=No (default avatar URL pattern) for {url}")
+            elif is_silhouette is False:
+                # Graph API explicitly confirmed it's a real photo
+                has_logo = True
+                logger.info(f"Logo=Yes (Graph API confirmed real photo) for {url}")
+            elif is_user_content and img_content_length > 3000:
+                # User content CDN + large file size = definitively a real photo
+                # (Overrides Graph API `is_silhouette=True` restrictions)
+                has_logo = True
+                logger.info(f"Logo=Yes (user-uploaded photo, {img_content_length} bytes) for {url}")
+            elif is_user_content and img_content_length > 0:
+                # User content CDN + small file size (<3000 bytes) = Monogram
+                has_logo = False
+                logger.info(f"Logo=No (monogram detected, {img_content_length} bytes) for {url}")
+            elif is_silhouette is True:
+                has_logo = False
+                logger.info(f"Logo=No (Graph API confirmed silhouette) for {url}")
+            elif img_content_length > 3000:
+                has_logo = True
+                logger.info(f"Logo=Yes (image downloaded, {img_content_length} bytes) for {url}")
+            elif profile_picture_url and _is_valid_pfp(profile_picture_url) and not is_silhouette:
+                has_logo = True
+                logger.info(f"Logo=Yes (valid profile image URL; download unavailable) for {url}")
+            else:
+                has_logo = False
+                logger.info(f"Logo=No (no valid image found) for {url}")
 
         except Exception as e:
             error_comments.append(f"Critical error: {type(e).__name__}")
@@ -793,13 +992,11 @@ class FacebookAnalyzer(AbstractAnalyzer):
         result.followers = followers
         result.location = location
 
-        if profile_picture_url and "placeholder" not in profile_picture_url:
-            result.has_logo = True
+        result.has_logo = has_logo
+        if profile_picture_url:
             result.profile_image_url = profile_picture_url
-            if profile_picture_b64:
-                result.profile_image_b64 = profile_picture_b64
-        else:
-            result.has_logo = False
+        if profile_picture_b64 and has_logo:
+            result.profile_image_b64 = profile_picture_b64
 
         result.created_at = created_date
         result.last_post_date = last_post_date
@@ -812,12 +1009,174 @@ class FacebookAnalyzer(AbstractAnalyzer):
         result.comments = ""
         self._calculate_risk(result)
 
+        # Record selector hits/misses to HealthManager
+        try:
+            from backend.core.health import HealthManager
+            health_mgr = HealthManager()
+            await health_mgr.record_selector_hit("facebook", "display_name", has_name)
+            await health_mgr.record_selector_hit("facebook", "followers", followers > 0)
+            await health_mgr.record_selector_hit("facebook", "profile_image", has_logo)
+            has_created = created_date != "No" and "Restricted" not in created_date
+            await health_mgr.record_selector_hit("facebook", "created_at", has_created)
+            await health_mgr.record_selector_hit("facebook", "last_post_date", bool(last_post_date))
+        except Exception as e:
+            logger.debug(f"Failed to record selector hits: {e}")
+
         await self.health.record_request("facebook", success=not bool(error_comments))
         logger.info(
             f"Done: {url} → {result.display_name} | "
             f"Followers={followers} | Created={created_date} | Active={is_active}"
         )
         return result
+
+    async def _try_transparency_modal(self, page) -> str | None:
+        """
+        Attempts to click the 'Page transparency', 'Profile transparency', or similar
+        detail/username elements to trigger the transparency modal, extracts the
+        creation/joined date from the modal DOM, and closes the modal via Escape.
+        This runs while we are on the main profile/page, avoiding expensive navigations.
+        """
+        try:
+            logger.info("Attempting to locate and click Transparency 'See all' button...")
+            
+            # Find and click transparency 'See all' button relative to headers
+            clicked = await page.evaluate("""
+                () => {
+                    const headers = Array.from(document.querySelectorAll('*')).filter(el => {
+                        const txt = (el.textContent || '').trim().toLowerCase();
+                        return (txt === 'page transparency' || txt === 'profile transparency');
+                    });
+                    
+                    for (const header of headers) {
+                        let parent = header.parentElement;
+                        for (let i = 0; i < 5; i++) {
+                            if (!parent) break;
+                            const buttons = Array.from(parent.querySelectorAll('span, div, a, [role="button"]')).filter(b => {
+                                const t = (b.textContent || '').trim().toLowerCase();
+                                return t === 'see all' || t.includes('see all') || t === 'see details';
+                            });
+                            if (buttons.length > 0) {
+                                buttons[0].click();
+                                return true;
+                            }
+                            parent = parent.parentElement;
+                        }
+                    }
+                    
+                    for (const header of headers) {
+                        if (header.offsetParent !== null) {
+                            header.click();
+                            return true;
+                        }
+                    }
+                    
+                    const directEls = Array.from(document.querySelectorAll('span, a, div[role="button"]')).filter(el => {
+                        const t = (el.textContent || '').trim().toLowerCase();
+                        return t.includes('page transparency') || t.includes('profile transparency');
+                    });
+                    for (const el of directEls) {
+                        if (el.offsetParent !== null) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    
+                    return false;
+                }
+            """)
+            
+            if clicked:
+                logger.info("Clicked transparency button/link. Waiting for modal...")
+                await asyncio.sleep(1.0)
+                
+                modal_text = await page.evaluate("""
+                    () => {
+                        const modals = Array.from(document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], div.x1cy8zhl, div.x1qpq9yb'));
+                        if (modals.length > 0) {
+                            return modals.map(m => m.innerText).join('\\n');
+                        }
+                        return document.body.innerText;
+                    }
+                """)
+                
+                # Check for standard creation and joined pattern matches
+                for pat in [
+                    r"Page created[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                    r"Joined Facebook[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                    r"Joined[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                    r"Joined[:\s\-–—]+([A-Za-z]+ \d{4})",
+                    r"Page created\s+(\d+\s+years?\s+ago)",
+                    r"Joined\s+(\d+\s+years?\s+ago)",
+                    r"Founded[^\w\n]?\s*(?:in)?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{4}|\d{4})",
+                ]:
+                    m = re.search(pat, modal_text, re.IGNORECASE)
+                    if m:
+                        dt = parse_date_robust(m.group(1).strip())
+                        if dt and dt.year >= 2004:
+                            found = dt.strftime("%d-%m-%Y")
+                            logger.info(f"Creation date found via transparency modal: {found}")
+                            await page.keyboard.press("Escape")
+                            return found
+                            
+                await page.keyboard.press("Escape")
+                
+        except Exception as e:
+            logger.debug(f"Transparency modal attempt failed: {e}")
+            
+        return None
+
+    async def _try_name_header_click(self, page) -> str | None:
+        """
+        New 2026 Strategy: Clicks the Page/Profile name (H1) in the header
+        to open the Profile/Page details modal, and extracts the exact creation date.
+        """
+        try:
+            logger.info("Attempting new 2026 Profile/Page name header click strategy...")
+            
+            # Find the H1 that contains the profile/page name
+            h1s = await page.locator("h1").all()
+            target_h1 = None
+            for h in h1s:
+                t = await h.inner_text()
+                t_clean = t.strip().lower()
+                if len(t_clean) > 1 and "notifications" not in t_clean and "error" not in t_clean:
+                    target_h1 = h
+                    break
+            
+            if target_h1:
+                logger.info(f"Clicking header: '{await target_h1.inner_text()}'...")
+                await target_h1.click(timeout=3000)
+                await asyncio.sleep(1.5)
+                
+                modal_text = await page.evaluate("""
+                    () => {
+                        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], div.x1cy8zhl, div.x1qpq9yb'));
+                        return dialogs.map(d => d.innerText).join('\\n');
+                    }
+                """)
+                
+                # Close the modal
+                await page.keyboard.press("Escape")
+                
+                for pat in [
+                    r"Joined Facebook[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+                    r"Created[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+                    r"Joined[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{4})",
+                    r"Page created[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+                    r"Founded[^\w\n]?\s*(?:in)?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{4}|\d{4})",
+                ]:
+                    m = re.search(pat, modal_text, re.IGNORECASE)
+                    if m:
+                        dt = parse_date_robust(m.group(1).strip())
+                        if dt and dt.year >= 2004:
+                            found = dt.strftime("%d-%m-%Y")
+                            logger.info(f"Creation date found via name header click pop-up: {found}")
+                            return found
+                            
+        except Exception as e:
+            logger.debug(f"Name header click pop-up attempt failed: {e}")
+            
+        return None
 
     async def _try_profile_feed_last_post_date(self, page) -> str | None:
         """
@@ -833,15 +1192,15 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     'a[role="tab"]:has-text("Posts"), a:has-text("Posts"), div[role="tab"]:has-text("Posts")'
                 ).first
                 if await posts_tab.count() > 0:
-                    await posts_tab.click(timeout=1500)
-                    await asyncio.sleep(0.8)
+                    await posts_tab.click(timeout=1000)
+                    await asyncio.sleep(0.3)
             except Exception:
                 pass
 
-            for _ in range(3):
+            for _ in range(1):
                 await _handle_blocking_popups(page)
                 await page.mouse.wheel(0, 1400)
-                await asyncio.sleep(0.7)
+                await asyncio.sleep(0.4)
 
                 try:
                     source = await asyncio.wait_for(page.content(), timeout=3.0)
@@ -912,146 +1271,76 @@ class FacebookAnalyzer(AbstractAnalyzer):
             return None
 
     async def _take_screenshot(self, page) -> bytes | None:
-        """Capture screenshot of current page state."""
+        """Fast screenshot — skip popup handling (already done), lower quality."""
         try:
-            await _handle_blocking_popups(page)
-            try:
-                content_el = await page.query_selector('div[role="main"]')
-                if content_el:
-                    bbox = await content_el.bounding_box()
-                    if bbox:
-                        return await page.screenshot(
-                            clip={
-                                "x": bbox["x"],
-                                "y": bbox["y"],
-                                "width": bbox["width"],
-                                "height": min(1000, bbox["height"]),
-                            },
-                            type="jpeg",
-                            quality=75,
-                        )
-            except:
-                pass
-            return await page.screenshot(full_page=False, type="jpeg", quality=75)
+            return await page.screenshot(full_page=False, type="jpeg", quality=50)
         except Exception:
             return None
 
-    async def _try_transparency_page(self, page, url: str) -> str | None:
+    async def _try_about_page(self, page, url: str) -> str | None:
         """
-        Strategy 1: Navigate to transparency page to find creation date.
-        Optimized: smart waits instead of fixed sleeps.
+        Strategy 2: Navigate to about / about_profile_transparency pages to find creation date.
+        Optimized: checks transparency page first, then standard about.
+        Handles both vanity URLs and profile.php ID-based URLs safely.
         """
         try:
-            transp_url = url.rstrip("/") + "/about_profile_transparency"
-            await page.goto(transp_url, wait_until="domcontentloaded", timeout=12000)
+            # Helper to construct sub-page URLs handling query parameters (profile.php?id=XYZ)
+            def build_sub_url(base_url: str, tab: str) -> str:
+                if not base_url:
+                    return ""
+                if "profile.php" in base_url:
+                    m = re.search(r"id=(\d+)", base_url)
+                    if m:
+                        uid = m.group(1)
+                        return f"https://www.facebook.com/profile.php?id={uid}&sk={tab}"
+                clean_url = base_url.split("?")[0].rstrip("/")
+                return f"{clean_url}/{tab}"
 
-            # Smart wait: wait for content to appear instead of fixed 4s sleep
+            # 1. Try appending /about_profile_transparency directly as it is clean and precise
+            about_transparency_url = build_sub_url(url, "about_profile_transparency")
+            logger.info(f"Navigating to Page Transparency: {about_transparency_url}")
             try:
-                await page.wait_for_selector(
-                    'text="Page transparency", text="See all", text="Page history"',
-                    timeout=5000
-                )
-            except:
-                await asyncio.sleep(1.5)
-
-            # Click 'See all' in the Page Transparency card
-            try:
-                see_all_selectors = [
-                    'div:has-text("Page transparency") >> div[role="button"]:has-text("See all")',
-                    'div[role="button"]:has-text("See all")',
-                    'a:has-text("See all")',
-                ]
-                clicked = False
-                for sel in see_all_selectors:
-                    try:
-                        loc = page.locator(sel).first
-                        if await loc.count() > 0:
-                            await loc.click(timeout=3000)
-                            clicked = True
-                            break
-                    except:
-                        continue
-
-                if not clicked:
-                    await page.locator('div[role="button"]:has-text("See all"), a:has-text("See all")').last.click(timeout=3000)
-
-                # Smart wait for dialog instead of fixed 2s sleep
-                await page.wait_for_selector('div[role="dialog"]', timeout=5000)
-
-                # Click History tab
-                hist_tab = page.locator('div[role="dialog"] [role="tab"]:has-text("History"), div[role="dialog"] [role="button"]:has-text("History")').first
-                if await hist_tab.count() > 0:
-                    await hist_tab.click()
-                    # Wait for tab content to load instead of fixed 2s sleep
-                    await asyncio.sleep(0.8)
-            except:
-                pass
-
-            # Extract text from the ACTIVE modal content
-            dialog = page.locator('div[role="dialog"]').last
-            if await dialog.count() > 0:
-                modal_text = await dialog.inner_text()
-                patterns = [
-                    r"Created[:\s\-–—]+(?:[A-Za-z\s]+)?(\d{1,2} [A-Za-z]+ \d{4})",
-                    r"Created[:\s\-–—]+(?:[A-Za-z\s]+)?([A-Za-z]+ \d{1,2},? \d{4})",
-                    r"Page created[:\s\-–—]+(\d{1,2} [A-Za-z]+ \d{4})",
-                ]
-                for pat in patterns:
-                    m = re.search(pat, modal_text, re.IGNORECASE)
+                await page.goto(about_transparency_url, wait_until="domcontentloaded", timeout=8000)
+                await asyncio.sleep(0.5)
+                await page.mouse.wheel(0, 1000)
+                await asyncio.sleep(0.3)
+                
+                about_text = await page.inner_text("body")
+                for pat in [
+                    r"Page created[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                    r"Joined Facebook[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                    r"Joined[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                    r"Joined[:\s\-–—]+([A-Za-z]+ \d{4})",
+                    r"Page created\s+(\d+\s+years?\s+ago)",
+                    r"Joined\s+(\d+\s+years?\s+ago)",
+                    r"Founded[^\w\n]?\s*(?:in)?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{4}|\d{4})",
+                ]:
+                    m = re.search(pat, about_text, re.IGNORECASE)
                     if m:
                         dt = parse_date_robust(m.group(1).strip())
                         if dt and dt.year >= 2004:
                             found = dt.strftime("%d-%m-%Y")
-                            logger.info(f"Creation date found (History Modal): {found}")
+                            logger.info(f"Creation date found (/about_profile_transparency page): {found}")
                             return found
+            except Exception as e:
+                logger.debug(f"Failed /about_profile_transparency page search: {e}")
 
-            # Fallback: scan entire transparency page text for creation-related dates
-            full_text = await page.evaluate("() => document.body.innerText")
-            
-            # Only match dates after creation-related keywords
-            creation_patterns = [
-                r"Page created[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
-                r"Created[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
-                r"Joined[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
-                r"Joined[:\s]*([A-Za-z]+\s+\d{4})",
-                r"Page created\s+(\d+\s+years?\s+ago)",
-                r"Joined\s+(\d+\s+years?\s+ago)",
-            ]
-            for pat in creation_patterns:
-                m = re.search(pat, full_text, re.IGNORECASE)
-                if m:
-                    dt = parse_date_robust(m.group(1).strip())
-                    if dt and dt.year >= 2004:
-                        found = dt.strftime("%d-%m-%Y")
-                        logger.info(f"Creation date found (Transparency Text): {found}")
-                        return found
+            # 2. Fallback to standard /about
+            about_url = build_sub_url(url, "about")
+            logger.info(f"Navigating to standard About: {about_url}")
+            await page.goto(about_url, wait_until="domcontentloaded", timeout=8000)
 
-        except Exception as e:
-            logger.debug(f"Transparency navigation failed: {e}")
-
-        return None
-
-    async def _try_about_page(self, page, url: str) -> str | None:
-        """
-        Strategy 2: Navigate to about page to find creation date.
-        Optimized: reduced scrolls, smart waits.
-        """
-        try:
-            about_url = url.rstrip("/") + "/about"
-            await page.goto(about_url, wait_until="domcontentloaded", timeout=10000)
-
-            # Reduced from 4 scrolls × 1.5s to 2 scrolls × fast
-            for _ in range(2):
-                await page.mouse.wheel(0, 1000)
-                await asyncio.sleep(0.6)
+            # Single fast scroll to load lazy content
+            await page.mouse.wheel(0, 1500)
+            await asyncio.sleep(0.3)
 
             about_text = await page.inner_text("body")
 
             for pat in [
-                r"Page created[:\s\-]+([A-Za-z]+ \d{1,2},? \d{4})",
-                r"Joined Facebook[:\s\-]+([A-Za-z]+ \d{1,2},? \d{4})",
-                r"Joined[:\s]+([A-Za-z]+ \d{1,2},? \d{4})",
-                r"Joined[:\s]+([A-Za-z]+ \d{4})",
+                r"Page created[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                r"Joined Facebook[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                r"Joined[:\s\-–—]+([A-Za-z]+ \d{1,2},? \d{4})",
+                r"Joined[:\s\-–—]+([A-Za-z]+ \d{4})",
                 r"Page created\s+(\d+\s+years?\s+ago)",
                 r"Joined\s+(\d+\s+years?\s+ago)",
                 r"Founded[^\w\n]?\s*(?:in)?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{4}|\d{4})",

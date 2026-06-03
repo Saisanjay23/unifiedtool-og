@@ -20,6 +20,7 @@ import requests as req_lib
 from backend.core.db import ProfileResult
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractAnalyzer
+from backend.platforms.utils import is_real_profile_image
 from backend.stealth.browser import create_stealth_browser
 from backend.stealth.human import HumanBehavior
 
@@ -195,10 +196,8 @@ class TikTokAnalyzer(AbstractAnalyzer):
 
             await human.pause("page_load")
 
-            # Aggressive popup dismissal — run multiple passes
-            for _ in range(3):
-                await self._dismiss_popups(page)
-                await asyncio.sleep(1)
+            # Aggressive popup dismissal
+            await self._dismiss_popups(page)
 
             # Check for CAPTCHA
             captcha_detected = await self._detect_captcha(page)
@@ -225,14 +224,14 @@ class TikTokAnalyzer(AbstractAnalyzer):
                 logger.debug(f"Profile selectors timed out for {url}, proceeding with SIGI/API data.")
 
             # Give extra time for full hydration (stats load 3-5s after DOM)
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
             # Scroll down to trigger lazy-loaded content, then back up
             try:
                 await page.evaluate("window.scrollBy(0, 600)")
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.5)
                 await page.evaluate("window.scrollTo(0, 0)")
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.5)
             except Exception:
                 pass
 
@@ -1145,7 +1144,7 @@ class TikTokAnalyzer(AbstractAnalyzer):
                 profile_image_url=image_url,
                 profile_image_b64=profile_image_b64,
                 screenshot_b64=screenshot_b64,
-                has_logo=bool(profile_image_b64 or image_url),
+                has_logo=is_real_profile_image(url=image_url, image_b64=profile_image_b64),
                 entity_type="Creator",
                 last_post_date=last_post_date,
             )
@@ -1297,9 +1296,12 @@ class TikTokAnalyzer(AbstractAnalyzer):
         if match:
             val = int(match.group(1))
             unit = match.group(2)
-            if unit == 'd': delta = timedelta(days=val)
-            elif unit == 'h': delta = timedelta(hours=val)
-            else: delta = timedelta(minutes=val)
+            if unit == 'd':
+                delta = timedelta(days=val)
+            elif unit == 'h':
+                delta = timedelta(hours=val)
+            else:
+                delta = timedelta(minutes=val)
             return (now - delta).strftime("%Y-%m-%d")
             
         # Handle "2 days ago", "3 hours ago"
@@ -1307,9 +1309,12 @@ class TikTokAnalyzer(AbstractAnalyzer):
         if match:
             val = int(match.group(1))
             unit = match.group(2)
-            if 'day' in unit: delta = timedelta(days=val)
-            elif 'hour' in unit: delta = timedelta(hours=val)
-            else: delta = timedelta(minutes=val)
+            if 'day' in unit:
+                delta = timedelta(days=val)
+            elif 'hour' in unit:
+                delta = timedelta(hours=val)
+            else:
+                delta = timedelta(minutes=val)
             return (now - delta).strftime("%Y-%m-%d")
             
         # Handle "12-25" or "12/25" (current year)
@@ -1367,8 +1372,8 @@ class TikTokAnalyzer(AbstractAnalyzer):
         for selector in POPUP_SELECTORS:
             try:
                 el = page.locator(selector).first
-                if await el.is_visible(timeout=800):
+                if await el.count() > 0 and await el.is_visible(timeout=100):
                     await el.click()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.2)
             except Exception:
                 pass

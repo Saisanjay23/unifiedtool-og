@@ -219,6 +219,8 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
     const [selectedIds, setSelectedIds] = useState(new Set());
     const [hiddenIds, setHiddenIds] = useState(new Set());
     const [loadingAllUrls, setLoadingAllUrls] = useState(false);
+    const [copySelectedFeedback, setCopySelectedFeedback] = useState(false);
+    const [copyAllFeedback, setCopyAllFeedback] = useState(false);
 
     // Clear hidden/selected state when filters or tabs change
     useEffect(() => {
@@ -420,6 +422,8 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
         const urls = results.filter(r => selectedIds.has(r._id)).map(r => r.url);
         if (urls.length > 0) {
             navigator.clipboard.writeText(urls.join('\n'));
+            setCopySelectedFeedback(true);
+            setTimeout(() => setCopySelectedFeedback(false), 2000);
         }
     };
 
@@ -431,9 +435,8 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
             const urls = res.data.urls || [];
             if (urls.length > 0) {
                 navigator.clipboard.writeText(urls.join('\n'));
-                alert(`✅ Copied ${urls.length} validated URLs to clipboard`);
-            } else {
-                alert('No validated URLs found');
+                setCopyAllFeedback(true);
+                setTimeout(() => setCopyAllFeedback(false), 2000);
             }
         } catch (err) {
             console.error('Failed to fetch validated URLs:', err);
@@ -441,7 +444,8 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
             const urls = results.map(r => r.url);
             if (urls.length > 0) {
                 navigator.clipboard.writeText(urls.join('\n'));
-                alert(`Copied ${urls.length} URLs from current page (backend fetch failed)`);
+                setCopyAllFeedback(true);
+                setTimeout(() => setCopyAllFeedback(false), 2000);
             }
         } finally {
             setLoadingAllUrls(false);
@@ -609,28 +613,33 @@ export default function ResultsGrid({ activePlatform, onProfileClick, liveResult
                         <button
                             style={{
                                 fontSize: 13, padding: '10px 16px', borderRadius: 8,
-                                background: 'linear-gradient(135deg, #1e3a5f, #2563eb)',
+                                background: copySelectedFeedback
+                                    ? 'linear-gradient(135deg, #059669, #10b981)'
+                                    : 'linear-gradient(135deg, #1e3a5f, #2563eb)',
                                 color: '#fff', border: 'none', cursor: selectedIds.size === 0 ? 'not-allowed' : 'pointer',
                                 fontWeight: 600, opacity: selectedIds.size === 0 ? 0.5 : 1,
+                                transition: 'background 0.3s ease',
                             }}
                             onClick={handleCopySelected}
                             disabled={selectedIds.size === 0}
                         >
-                            📋 Copy Selected Profile URLs ({selectedIds.size})
+                            {copySelectedFeedback ? '✅ Copied!' : `📋 Copy Selected Profile URLs (${selectedIds.size})`}
                         </button>
                         <button
                             style={{
                                 fontSize: 13, padding: '10px 16px', borderRadius: 8,
-                                background: loadingAllUrls
-                                    ? 'linear-gradient(135deg, #374151, #4b5563)'
-                                    : 'linear-gradient(135deg, #6b21a8, #7c3aed)',
+                                background: copyAllFeedback
+                                    ? 'linear-gradient(135deg, #059669, #10b981)'
+                                    : loadingAllUrls
+                                        ? 'linear-gradient(135deg, #374151, #4b5563)'
+                                        : 'linear-gradient(135deg, #6b21a8, #7c3aed)',
                                 color: '#fff', border: 'none', cursor: loadingAllUrls ? 'wait' : 'pointer',
                                 fontWeight: 600, transition: 'all 0.2s ease',
                             }}
                             disabled={loadingAllUrls}
                             onClick={handleCopyAllValidated}
                         >
-                            {loadingAllUrls ? '⏳ Fetching...' : `📋 Copy ALL Validated URLs (${totalValidatedCount})`}
+                            {copyAllFeedback ? '✅ Copied!' : loadingAllUrls ? '⏳ Fetching...' : `📋 Copy ALL Validated URLs (${totalValidatedCount})`}
                         </button>
                     </div>
                 </>

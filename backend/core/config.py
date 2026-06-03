@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     PAGE_NAVIGATION_TIMEOUT_MS: int = 60000
     ELEMENT_WAIT_TIMEOUT_MS: int = 15000
 
+    # Discovery speed mode: "stealth" (safest), "balanced" (recommended), "aggressive" (fastest)
+    # stealth   = full human simulation, conservative delays (original behavior)
+    # balanced  = reduced delays, keep core anti-detection (2-3x faster)
+    # aggressive = minimum viable delays, skip jitter/breaks (4-6x faster, higher risk)
+    DISCOVERY_SPEED_MODE: str = "balanced"
+
     # Optional browser proxy, for example: http://user:pass@proxy:8080
     PROXY_URL: str | None = None
 
@@ -57,12 +63,12 @@ class Settings(BaseSettings):
     PROXY_URLS: str | None = None
 
     # Rate limits per hour per platform
-    RATE_LIMIT_FACEBOOK: int = 30
-    RATE_LIMIT_INSTAGRAM: int = 60
-    RATE_LIMIT_TWITTER: int = 40
+    RATE_LIMIT_FACEBOOK: int = 60
+    RATE_LIMIT_INSTAGRAM: int = 100
+    RATE_LIMIT_TWITTER: int = 80
     RATE_LIMIT_YOUTUBE: int = 100
     RATE_LIMIT_TELEGRAM: int = 80
-    RATE_LIMIT_TIKTOK: int = 60
+    RATE_LIMIT_TIKTOK: int = 80
 
     # Analysis performance tuning
     ANALYSIS_CONCURRENT_TABS: int = 3

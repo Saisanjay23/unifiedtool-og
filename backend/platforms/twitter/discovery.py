@@ -8,6 +8,7 @@ import asyncio
 import random
 from urllib.parse import quote
 
+from backend.core.config import settings
 from backend.core.db import ProfileResult
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractDiscoverer
@@ -30,6 +31,7 @@ class TwitterDiscoverer(AbstractDiscoverer):
         keywords: list[str],
         max_results: int = 50,
         headless: bool = True,
+        use_free_proxy: bool = False,
         **kwargs,
     ) -> list[ProfileResult]:
 
@@ -38,14 +40,23 @@ class TwitterDiscoverer(AbstractDiscoverer):
         from backend.stealth.browser import create_stealth_browser
 
         pw, browser, context, page = await create_stealth_browser(
-            platform="twitter", headless=headless
+            platform="twitter", headless=headless, use_free_proxy=use_free_proxy
         )
 
         try:
             # Validate Login (Legacy logic checks home first)
             try:
                 await page.goto("https://x.com/home", timeout=60000)
-                await asyncio.sleep(5)
+                # Smart wait: wait for Twitter to render (login redirect or home feed)
+                # instead of a fixed 5s sleep
+                _mode = settings.DISCOVERY_SPEED_MODE
+                try:
+                    await page.wait_for_selector(
+                        'a[href="/home"], a[href="/login"]',
+                        timeout=8000,
+                    )
+                except Exception:
+                    await asyncio.sleep(1.0 if _mode == "aggressive" else 2.0 if _mode == "balanced" else 5.0)
                 if "login" in page.url:
                     logger.error("Authentication Required for Twitter Discovery.")
                     await progress_callback(
@@ -166,7 +177,15 @@ class TwitterDiscoverer(AbstractDiscoverer):
 
         try:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(5, 8))
+            # Smart wait: wait for UserCell elements to render instead of fixed 5-8s
+            _mode = settings.DISCOVERY_SPEED_MODE
+            try:
+                await page.wait_for_selector(
+                    'div[data-testid="UserCell"], div[data-testid="cellInnerDiv"]',
+                    timeout=10000,
+                )
+            except Exception:
+                await asyncio.sleep(1.0 if _mode == "aggressive" else 2.0 if _mode == "balanced" else 5.0)
 
             # Detect and recover from "Something went wrong" error page
             for retry in range(3):
@@ -183,13 +202,17 @@ class TwitterDiscoverer(AbstractDiscoverer):
                         try_again = page.locator('text="Try again"').first
                         if await try_again.is_visible(timeout=3000):
                             await try_again.click()
-                            await asyncio.sleep(5)
+                            # Speed-mode-aware retry wait (was hardcoded 5s)
+                            _mode = settings.DISCOVERY_SPEED_MODE
+                            await asyncio.sleep(1.0 if _mode == "aggressive" else 2.0 if _mode == "balanced" else 5.0)
                             continue
                     except Exception:
                         pass
                     # If no button, do a full reload
                     await page.reload(wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(random.uniform(5, 8))
+                    # Speed-mode-aware reload wait (was hardcoded 5-8s)
+                    _mode = settings.DISCOVERY_SPEED_MODE
+                    await asyncio.sleep(random.uniform(1, 2) if _mode == "aggressive" else random.uniform(2, 4) if _mode == "balanced" else random.uniform(5, 8))
                 else:
                     break  # Page loaded successfully
 
@@ -223,14 +246,16 @@ class TwitterDiscoverer(AbstractDiscoverer):
                             try_again = page.locator('text="Try again"').first
                             if await try_again.is_visible(timeout=2000):
                                 await try_again.click()
-                                await asyncio.sleep(5)
+                                _mode = settings.DISCOVERY_SPEED_MODE
+                                await asyncio.sleep(1.0 if _mode == "aggressive" else 2.0 if _mode == "balanced" else 5.0)
                                 continue
                         except Exception:
                             pass
                 except Exception:
                     pass
 
-                await asyncio.sleep(2)
+                _mode = settings.DISCOVERY_SPEED_MODE
+                await asyncio.sleep(0.3 if _mode == "aggressive" else 0.8 if _mode == "balanced" else 2.0)
                 no_change_count += 1
 
             new_in_batch = 0
@@ -294,6 +319,7 @@ class TwitterDiscoverer(AbstractDiscoverer):
                         username=res["handle"],
                         display_name=res["name"],
                         profile_image_url=hd_img_url,
+                        has_logo=bool(hd_img_url),
                         bio=res["bio"],
                         followers=followers_count,
                         is_verified=is_verified,
@@ -325,12 +351,23 @@ class TwitterDiscoverer(AbstractDiscoverer):
                 break
 
             await page.mouse.wheel(0, 4000)
-            await asyncio.sleep(random.uniform(2, 4))
+
+            # Smart wait: wait for DOM to update after scroll instead of fixed 2-4s
+            _mode = settings.DISCOVERY_SPEED_MODE
+            _pre_height = await page.evaluate("document.body.scrollHeight")
+            try:
+                await page.wait_for_function(
+                    f"() => document.body.scrollHeight > {_pre_height}",
+                    timeout=3000 if _mode == "aggressive" else 5000 if _mode == "balanced" else 8000,
+                )
+            except Exception:
+                # Content didn't grow — might be end of results or slow load
+                await asyncio.sleep(0.5 if _mode == "aggressive" else 1.0 if _mode == "balanced" else 2.0)
 
             new_height = await page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.3 if _mode == "aggressive" else 0.8 if _mode == "balanced" else 2.0)
             last_height = new_height
 
         return profiles
@@ -360,7 +397,7 @@ class TwitterDiscoverer(AbstractDiscoverer):
                 name_text = await cell.locator(
                     'div[dir="ltr"] > span > span'
                 ).first.inner_text()
-            except:
+            except Exception:
                 name_text = handle
 
             img_src = ""
@@ -383,7 +420,7 @@ class TwitterDiscoverer(AbstractDiscoverer):
                     # New Twitter DOM places image in a div, but it might not even render until interacted with
                     # Provide empty string to let it fallback to default avatar on frontend discovery card
                     img_src = ""
-            except:
+            except Exception:
                 pass
 
             bio_text = ""
@@ -391,7 +428,7 @@ class TwitterDiscoverer(AbstractDiscoverer):
                 bio_el = cell.locator('div[dir="auto"]').last
                 if await bio_el.count() > 0:
                     bio_text = await bio_el.inner_text()
-            except:
+            except Exception:
                 pass
 
             return {

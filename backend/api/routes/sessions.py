@@ -279,6 +279,19 @@ async def get_session_status(platform: str):
             session_expired = True
             expired_reason = validation.get("reason", "unknown")
             logger.info(f"Session expired for {platform}: {expired_reason}")
+            
+            # Sync with HealthManager
+            health_mgr = HealthManager()
+            p_health = health_mgr._get_platform(platform)
+            p_health.is_suspended = True
+            p_health.suspension_reason = f"Session expired: {expired_reason}"
+            health_mgr._recalculate_score(p_health)
+        else:
+            # If session is active and valid, clear any expired suspension if present
+            health_mgr = HealthManager()
+            p_health = health_mgr._get_platform(platform)
+            if p_health.is_suspended and "Session expired" in p_health.suspension_reason:
+                health_mgr.clear_suspension(platform)
 
     return {
         "platform": platform,

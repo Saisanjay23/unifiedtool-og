@@ -10,7 +10,7 @@ from googleapiclient.discovery import build
 from backend.core.db import ProfileResult
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractAnalyzer
-from backend.platforms.utils import calculate_risk, download_profile_image
+from backend.platforms.utils import calculate_risk, download_profile_image, is_real_profile_image
 from backend.stealth.browser import create_stealth_browser
 
 logger = get_logger("platforms.youtube.analysis")
@@ -181,7 +181,6 @@ class YouTubeAnalyzer(AbstractAnalyzer):
                                     result.location = country_code
 
                             # Profile picture
-                            result.has_logo = True
                             thumbnails = snippet.get("thumbnails", {})
                             thumb_url = thumbnails.get("high", {}).get(
                                 "url"
@@ -189,7 +188,13 @@ class YouTubeAnalyzer(AbstractAnalyzer):
                             if thumb_url:
                                 # Upgrade to HD (800x800) by replacing =s... with =s800
                                 thumb_url = re.sub(r'=s\d+-', '=s800-', thumb_url)
-                                result.profile_image_url = thumb_url
+                                if is_real_profile_image(url=thumb_url):
+                                    result.has_logo = True
+                                    result.profile_image_url = thumb_url
+                                else:
+                                    result.has_logo = False
+                            else:
+                                result.has_logo = False
 
                             # Last video / active
                             if last_video:

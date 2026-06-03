@@ -21,6 +21,7 @@ from backend.core.health import HealthManager
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractAnalyzer
 from backend.platforms.utils import calculate_risk as _calculate_risk_shared
+from backend.platforms.utils import is_real_profile_image
 from backend.stealth.browser import create_stealth_browser
 
 logger = get_logger("platforms.telegram.analysis")
@@ -49,6 +50,9 @@ class TelegramAnalyzer(AbstractAnalyzer):
                 raise RuntimeError("Invalid API ID format") from exc
 
             session_path = os.path.join(self.config.SESSION_PATH, "telegram")
+            from backend.platforms.utils import repair_telegram_session
+            repair_telegram_session(session_path)
+
             client = TelegramClient(
                 session_path,
                 api_id,
@@ -174,9 +178,11 @@ class TelegramAnalyzer(AbstractAnalyzer):
                 last_message_task,
             )
 
-            if photo_b64:
+            if photo_b64 and is_real_profile_image(image_b64=photo_b64):
                 result.profile_image_b64 = photo_b64
                 result.has_logo = True
+            else:
+                result.has_logo = False
 
             if screenshot_b64:
                 result.screenshot_b64 = screenshot_b64

@@ -227,13 +227,33 @@ class HealthManager:
                 0 if self._is_hour_window_expired(health)
                 else health.requests_this_hour
             )
+
+            # Check if the session file actually exists or if the platform has credentials.
+            # If not, treat as suspended in real-time.
+            is_suspended = health.is_suspended
+            if name not in ("telegram", "youtube"):
+                session_file = os.path.join(settings.SESSION_PATH, f"{name}.json")
+                if not os.path.exists(session_file):
+                    is_suspended = True
+            elif name == "youtube":
+                if not settings.YOUTUBE_API_KEY:
+                    is_suspended = True
+            elif name == "telegram":
+                session_file = os.path.join(settings.SESSION_PATH, "telegram.session")
+                has_keys = bool(settings.TELEGRAM_API_ID and settings.TELEGRAM_API_HASH)
+                if not (has_keys and os.path.exists(session_file)):
+                    is_suspended = True
+
+            effective_score = 0.0 if is_suspended else health.health_score
+            effective_status = "suspended" if is_suspended else self.get_health_status(name)
+
             result[name] = {
-                "score": round(health.health_score, 3),
-                "status": self.get_health_status(name),
+                "score": round(effective_score, 3),
+                "status": effective_status,
                 "total_requests": health.total_requests,
                 "requests_this_hour": requests_this_hour,
                 "consecutive_errors": health.consecutive_errors,
-                "is_suspended": health.is_suspended,
+                "is_suspended": is_suspended,
                 "last_request_at": health.last_request_at,
             }
         return result

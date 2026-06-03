@@ -366,6 +366,7 @@ export default function AnalysisResultsGrid({ activePlatform, inMemoryResults, s
     const { selectedClient } = useStore();
     const [page, setPage] = useState(0);
     const [isRescraping, setIsRescraping] = useState(false);
+    const [copyFeedback, setCopyFeedback] = useState(false);
 
     const results = inMemoryResults || [];
     const totalCount = results.length;
@@ -547,15 +548,19 @@ export default function AnalysisResultsGrid({ activePlatform, inMemoryResults, s
                                     style={{
                                         marginTop: 10, width: '100%', padding: '10px 16px',
                                         borderRadius: 8, border: 'none', cursor: 'pointer',
-                                        background: 'linear-gradient(135deg, #0891b2, #06b6d4)',
+                                        background: copyFeedback
+                                            ? 'linear-gradient(135deg, #059669, #10b981)'
+                                            : 'linear-gradient(135deg, #0891b2, #06b6d4)',
                                         color: '#fff', fontWeight: 600, fontSize: 13,
+                                        transition: 'background 0.3s ease',
                                     }}
                                     onClick={() => {
                                         navigator.clipboard.writeText(buildTsvContent(results));
-                                        alert('TSV results copied to clipboard!');
+                                        setCopyFeedback(true);
+                                        setTimeout(() => setCopyFeedback(false), 2000);
                                     }}
                                 >
-                                    📋 Copy to Clipboard
+                                    {copyFeedback ? '✅ Copied!' : '📋 Copy to Clipboard'}
                                 </button>
                             </div>
 

@@ -22,6 +22,7 @@ class TelegramDiscoverer(AbstractDiscoverer):
         keywords: list[str],
         max_results: int = 50,
         headless: bool = True,
+        use_free_proxy: bool = False,
         **kwargs,
     ) -> list[ProfileResult]:
         results = []
@@ -47,6 +48,9 @@ class TelegramDiscoverer(AbstractDiscoverer):
 
         session_path = os.path.join(self.config.SESSION_PATH, "telegram")
         os.makedirs(self.config.SESSION_PATH, exist_ok=True)
+
+        from backend.platforms.utils import repair_telegram_session
+        repair_telegram_session(session_path)
 
         tg_client = TelegramClient(
             session_path,

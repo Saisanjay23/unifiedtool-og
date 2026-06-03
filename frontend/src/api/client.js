@@ -13,6 +13,8 @@ const api = axios.create({
     headers: { 'Content-Type': 'application/json' },
 });
 
+const pathPart = (value) => encodeURIComponent(String(value));
+
 // normalize error responses
 api.interceptors.response.use(
     (res) => res,
@@ -41,37 +43,38 @@ export const getJobStatus = (jobId) => api.get(`/jobs/${jobId}`);
 export const cancelJob = (jobId) => api.delete(`/jobs/${jobId}`);
 
 // -- Results --
-export const getResults = (client, params) => api.get(`/results/${client}`, { params });
+export const getResults = (client, params) => api.get(`/results/${pathPart(client)}`, { params });
 export const updateResultStatus = (docId, platform, status) =>
-    api.patch(`/results/${docId}`, { status, platform });
+    api.patch(`/results/${pathPart(docId)}`, { status, platform });
 export const updateResultFields = (docId, platform, fields) =>
-    api.patch(`/results/${docId}/fields`, { platform, fields });
+    api.patch(`/results/${pathPart(docId)}/fields`, { platform, fields });
 export const exportResults = (client, params) =>
-    api.get(`/results/${client}/export`, { params, responseType: 'blob' });
+    api.get(`/results/${pathPart(client)}/export`, { params, responseType: 'blob' });
 export const exportMemoryResults = (client, data) =>
-    api.post(`/results/${client}/export-memory`, data, { responseType: 'blob' });
+    api.post(`/results/${pathPart(client)}/export-memory`, data, { responseType: 'blob' });
 export const getKeywords = (client, platform) =>
-    api.get(`/results/${client}/keywords`, { params: { platform } });
+    api.get(`/results/${pathPart(client)}/keywords`, { params: { platform } });
 export const getKnownUrls = (client, platform) =>
-    api.get(`/results/${client}/known-urls`, { params: { platform } });
+    api.get(`/results/${pathPart(client)}/known-urls`, { params: { platform } });
 export const getValidatedUrls = (client, platform) =>
-    api.get(`/results/${client}/validated-urls`, { params: { platform } });
+    api.get(`/results/${pathPart(client)}/validated-urls`, { params: { platform } });
 
 // -- Health --
 export const getHealth = () => api.get('/health');
+export const validateSelectors = (platform) => api.post('/health/selectors/validate', null, { params: { platform } });
 
 // -- Clients --
 export const getClients = () => api.get('/clients');
 export const createClient = (name) => api.post('/clients', { name });
-export const deleteClient = (name) => api.delete(`/clients/${name}`);
+export const deleteClient = (name) => api.delete(`/clients/${pathPart(name)}`);
 
 // -- Keyword Presets --
 export const getPresets = (client, platform) =>
-    api.get(`/presets/${client}/${platform}`);
+    api.get(`/presets/${pathPart(client)}/${pathPart(platform)}`);
 export const savePreset = (client, platform, presetName, keywords) =>
-    api.post(`/presets/${client}/${platform}`, { preset_name: presetName, keywords });
+    api.post(`/presets/${pathPart(client)}/${pathPart(platform)}`, { preset_name: presetName, keywords });
 export const deletePreset = (client, platform, presetName) =>
-    api.delete(`/presets/${client}/${platform}/${encodeURIComponent(presetName)}`);
+    api.delete(`/presets/${pathPart(client)}/${pathPart(platform)}/${pathPart(presetName)}`);
 
 // -- Sessions --
 export const launchSession = (platform) => api.post(`/sessions/${platform}/launch`);

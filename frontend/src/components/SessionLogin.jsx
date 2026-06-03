@@ -16,6 +16,7 @@ import {
     sendTelegramCode,
     verifyTelegramCode,
     verifyTelegramPassword,
+    validateSelectors,
 } from '../api/client';
 
 const PLATFORMS = [
@@ -33,6 +34,28 @@ export default function SessionLogin() {
     const [credentialsExpanded, setCredentialsExpanded] = useState(null);
     const [cookieInput, setCookieInput] = useState('');
     const [message, setMessage] = useState({ text: '', type: '' });
+
+    const [isValidating, setIsValidating] = useState({});
+    const [validationResults, setValidationResults] = useState({});
+
+    const handleValidateSelectors = async (platformId) => {
+        setIsValidating((prev) => ({ ...prev, [platformId]: true }));
+        showMsg(`Running selector validation check for ${platformId.toUpperCase()}...`, 'warning');
+        try {
+            const res = await validateSelectors(platformId);
+            const data = res.data.results[platformId];
+            setValidationResults((prev) => ({ ...prev, [platformId]: data }));
+            if (data.success) {
+                showMsg(`${platformId.toUpperCase()} selectors are fully functional!`);
+            } else {
+                showMsg(`${platformId.toUpperCase()} has broken/degraded selectors. See report below.`, 'warning');
+            }
+        } catch (e) {
+            showMsg(`Validation failed: ${e.message}`, 'error');
+        } finally {
+            setIsValidating((prev) => ({ ...prev, [platformId]: false }));
+        }
+    };
 
     // --- YouTube form state ---
     const [ytApiKey, setYtApiKey] = useState('');
@@ -255,7 +278,41 @@ export default function SessionLogin() {
                                         )}
                                     </>
                                 )}
+                                {['facebook', 'instagram', 'twitter'].includes(platform.id) && (
+                                    <button className="btn-session" style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid rgba(255, 255, 255, 0.1)', color: 'var(--text-secondary)' }} onClick={() => handleValidateSelectors(platform.id)} disabled={isValidating[platform.id]}>
+                                        {isValidating[platform.id] ? '⏳ Testing...' : '🔍 Test Selectors'}
+                                    </button>
+                                )}
                             </div>
+
+                            {/* Selector Validation Results */}
+                            {validationResults[platform.id] && (
+                                <div className="session-card__cookie-panel" style={{ marginTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.1)', paddingTop: '12px', width: '100%', boxSizing: 'border-box' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                        <span style={{ fontSize: '12px', fontWeight: 'bold' }}>Selector Integrity Report</span>
+                                        <span style={{ fontSize: '11px', fontWeight: '600', color: validationResults[platform.id].success ? '#2ecc71' : '#f1c40f' }}>
+                                            {validationResults[platform.id].success ? '● PASS' : '⚠ DEGRADED'}
+                                        </span>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px' }}>
+                                        {Object.entries(validationResults[platform.id].metrics || {}).map(([field, data]) => (
+                                            <div key={field} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255, 255, 255, 0.03)', padding: '6px 8px', borderRadius: '4px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                                                <span style={{ textTransform: 'capitalize', fontWeight: '500', color: 'var(--text-secondary)' }}>{field.replace('_', ' ')}</span>
+                                                <span style={{ color: data.status === 'pass' ? '#2ecc71' : data.status === 'fail' ? '#e74c3c' : '#f1c40f', fontWeight: '600' }} title={data.details}>
+                                                    {data.status === 'pass' ? '✓' : data.status === 'fail' ? '✗' : '⚠'} {data.status.toUpperCase()}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <button className="btn-session" style={{ marginTop: '8px', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '10px', width: '100%', textAlign: 'center', cursor: 'pointer', padding: '4px 0' }} onClick={() => {
+                                        const newRes = { ...validationResults };
+                                        delete newRes[platform.id];
+                                        setValidationResults(newRes);
+                                    }}>
+                                        Clear Report
+                                    </button>
+                                </div>
+                            )}
 
                             {/* Cookie Import Panel */}
                             {isExpanded && (

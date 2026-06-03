@@ -54,6 +54,7 @@ function DiscoveryTab({ activePlatform, selectedClient, onAnalyzeUrls }) {
     const [error, setError] = useState('');
     const [searchType, setSearchType] = useState('people'); // people | pages | both
     const [scrapeAll, setScrapeAll] = useState(false);
+    const [useFreeProxy, setUseFreeProxy] = useState(false);
     const [liveResults, setLiveResults] = useState([]);
 
     // Clear live results when switching clients to prevent data leaks
@@ -61,6 +62,7 @@ function DiscoveryTab({ activePlatform, selectedClient, onAnalyzeUrls }) {
         setLiveResults([]);
         setActiveJobId(null);
         setError('');
+        setUseFreeProxy(false);
     }, [selectedClient, activePlatform]);
 
     const handleLaunch = useCallback(async () => {
@@ -79,6 +81,7 @@ function DiscoveryTab({ activePlatform, selectedClient, onAnalyzeUrls }) {
                 headless,
                 max_results: scrapeAll ? 99999 : maxResults,
                 search_type: activePlatform === 'facebook' ? searchType : 'people',
+                use_free_proxy: activePlatform === 'tiktok' ? useFreeProxy : false,
             });
             setActiveJobId(res.data.job_id);
             setLiveResults([]);  // Clear live results for new job
@@ -182,6 +185,24 @@ function DiscoveryTab({ activePlatform, selectedClient, onAnalyzeUrls }) {
                             Headless Mode
                         </label>
                     </div>
+
+                    {/* Free Proxy Toggle (TikTok Only) */}
+                    {activePlatform === 'tiktok' && (
+                        <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', borderRadius: 4, background: 'rgba(254, 44, 85, 0.1)', border: '1px solid rgba(254, 44, 85, 0.3)' }}>
+                            <input
+                                type="checkbox"
+                                id="proxy-toggle-disc"
+                                checked={useFreeProxy}
+                                onChange={(e) => setUseFreeProxy(e.target.checked)}
+                                style={{ width: 16, height: 16, cursor: 'pointer', accentColor: '#FE2C55' }}
+                            />
+                            <label htmlFor="proxy-toggle-disc" className="form-label" style={{ margin: 0, cursor: 'pointer', color: '#FE2C55', fontWeight: 600 }}
+                                title="Fetches a free public proxy to bypass regional bans (WARNING: Free proxies are often blocked by TikTok CAPTCHAs)"
+                            >
+                                🌐 Use Free Proxy (Bypass Ban)
+                            </label>
+                        </div>
+                    )}
                 </div>
 
                 {error && (

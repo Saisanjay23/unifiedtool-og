@@ -140,15 +140,34 @@ def create_app() -> FastAPI:
     # Global Rate Limiting State (Memory-bound token bucket)
     _rate_limit_state = defaultdict(list)
 
+    rate_limited_paths = (
+        "/jobs",
+        "/api/jobs",
+        "/sessions/telegram/auth/",
+        "/api/sessions/telegram/auth/",
+    )
+    rate_limited_session_suffixes = (
+        "/launch",
+        "/cookies",
+        "/credentials",
+    )
+
+    def _is_rate_limited_path(path: str) -> bool:
+        if path in ("/jobs", "/api/jobs"):
+            return True
+        if path.startswith(("/sessions/", "/api/sessions/")):
+            return path.startswith(rate_limited_paths) or path.endswith(
+                rate_limited_session_suffixes
+            )
+        return False
+
     @app.middleware("http")
     async def rate_limit_middleware(request, call_next):
         client_ip = request.client.host if request.client else "127.0.0.1"
         path = request.url.path
 
         # Apply standard rate limiting to these critical external endpoints
-        if path.startswith("/api/jobs/create") or path.startswith(
-            "/api/sessions/login"
-        ):
+        if _is_rate_limited_path(path):
             now = time.time()
             # Clean up old timestamps (older than 60 seconds)
             _rate_limit_state[client_ip] = [

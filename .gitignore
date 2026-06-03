@@ -1,60 +1,48 @@
-# Secrets and credentials
+# Secrets and local configuration
 .env
+.env.*
+!.env.example
+
+# Runtime data
 sessions/
+logs/
+exports/
 *.session
+*.session-journal
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.egg-info/
-dist/
-build/
 .pytest_cache/
+.ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
 .venv/
 venv/
+env/
 
-# Node / frontend
-node_modules/
+# Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local caches and generated files
 .npm-cache/
+*.log
+*.tmp
+*.bak
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
+# OS / editor
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
 
-# Exports and logs
-exports/
-logs/
-*.log
-
-# Tooling artifacts
-.ruff_cache/
-vulture_output.txt
-codebase_map.json
-
-# Debug / diagnostic artifacts
-test_fb_*.py
-test_dump_*.py
-test_sniff_*.py
-verify_fb_*.py
-diag_*.py
-diag_*.png
-fb_*.txt
-fb_*.html
-fb_*.png
-meta_*.txt
-meta_*.html
-hovercard_diag.txt
-modi_transp.txt
-timestamp_sniffer.txt
+# OneDrive / Office lock files
+~$*

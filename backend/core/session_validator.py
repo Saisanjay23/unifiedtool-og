@@ -24,8 +24,8 @@ from backend.core.logger import get_logger
 
 logger = get_logger("session_validator")
 
-# Cache TTL in seconds (5 minutes)
-CACHE_TTL = 300
+# Cache TTL in seconds (20 seconds for near real-time updates)
+CACHE_TTL = 20
 
 # HTTP request timeout in seconds
 REQUEST_TIMEOUT = 5
@@ -134,15 +134,27 @@ class SessionValidator:
                 reason="skip",
             )
 
+        # Get current session file mtime to check for modifications
+        session_file = os.path.join(settings.SESSION_PATH, f"{platform}.json")
+        current_mtime = None
+        if os.path.exists(session_file):
+            try:
+                current_mtime = os.path.getmtime(session_file)
+            except Exception:
+                pass
+
         # Check cache
         cached = self._cache.get(platform)
-        if cached and (time.time() - cached["_ts"]) < CACHE_TTL:
-            return {
-                "valid": cached["valid"],
-                "checked_at": cached["checked_at"],
-                "reason": cached["reason"],
-                "uncertain": cached.get("uncertain", False),
-            }
+        if cached:
+            # If the session file was modified, deleted, or created, invalidate cache
+            file_changed = cached.get("_mtime") != current_mtime
+            if not file_changed and (time.time() - cached["_ts"]) < CACHE_TTL:
+                return {
+                    "valid": cached["valid"],
+                    "checked_at": cached["checked_at"],
+                    "reason": cached["reason"],
+                    "uncertain": cached.get("uncertain", False),
+                }
 
         # Run validation in thread pool to avoid blocking
         try:
@@ -156,8 +168,12 @@ class SessionValidator:
                 uncertain=True,
             )
 
-        # Cache the result
-        self._cache[platform] = {**result, "_ts": time.time()}
+        # Cache the result with mtime
+        self._cache[platform] = {
+            **result,
+            "_ts": time.time(),
+            "_mtime": current_mtime,
+        }
         return result
 
     def _validate_sync(self, platform: str) -> dict:

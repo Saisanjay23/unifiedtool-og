@@ -12,6 +12,7 @@ import json
 import random
 import re
 
+from backend.core.config import settings
 from backend.core.db import ProfileResult
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractDiscoverer
@@ -111,6 +112,7 @@ class TikTokDiscoverer(AbstractDiscoverer):
             platform="tiktok",
             headless=headless,
             session_file=session_file,
+            use_free_proxy=kwargs.get("use_free_proxy", False),
         )
         logger.info("Browser created successfully for TikTok discovery.")
 
@@ -147,11 +149,11 @@ class TikTokDiscoverer(AbstractDiscoverer):
                     )
                     try:
                         await browser.close()
-                    except:
+                    except Exception:
                         pass
                     try:
                         await pw.stop()
-                    except:
+                    except Exception:
                         pass
 
                     pw, browser, context, page = await create_stealth_browser(
@@ -282,9 +284,10 @@ class TikTokDiscoverer(AbstractDiscoverer):
             await human.pause("page_load")
 
             # Aggressive popup dismissal — run multiple passes
+            _mode = settings.DISCOVERY_SPEED_MODE
             for _ in range(3):
                 await self._dismiss_popups(page)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3 if _mode == "aggressive" else 0.5 if _mode == "balanced" else 1)
 
             # Check for CAPTCHA page
             captcha_detected = await self._detect_captcha(page)
@@ -324,10 +327,13 @@ class TikTokDiscoverer(AbstractDiscoverer):
                 logger.debug(
                     f"Wait for user container timed out for '{keyword}', proceeding with API/SIGI data."
                 )
-                await asyncio.sleep(5)
+                _mode = settings.DISCOVERY_SPEED_MODE
+                await asyncio.sleep(1.5 if _mode == "aggressive" else 2.5 if _mode == "balanced" else 5)
 
             # Give page extra time for API responses to fire and SIGI_STATE to populate
-            await asyncio.sleep(5)
+            # Speed-mode-aware settle wait (was hardcoded 5s)
+            _mode = settings.DISCOVERY_SPEED_MODE
+            await asyncio.sleep(1.5 if _mode == "aggressive" else 3.0 if _mode == "balanced" else 5.0)
 
             # One more popup dismissal after content loads
             await self._dismiss_popups(page)
@@ -512,7 +518,7 @@ class TikTokDiscoverer(AbstractDiscoverer):
                             const href = link.getAttribute('href') || link.href || "";
                             if (href.includes('/@')) {
                                 profileUrl = href.startsWith('http') ? href : 'https://www.tiktok.com' + href;
-                                const match = href.match(/\/@([^/?]+)/);
+                                const match = href.match(/[/]@([^/?]+)/);
                                 if (match) username = match[1];
                                 break;
                             }
@@ -547,7 +553,7 @@ class TikTokDiscoverer(AbstractDiscoverer):
                                 if (text && text.length > 1 && text.length < 80 && 
                                     !text.startsWith('@') && !text.includes('Follow') &&
                                     !text.includes('Follower') && !text.includes('Like') &&
-                                    !text.match(/^[\d.]+[KMBkmb]?$/) &&
+                                    !text.match(/^[0-9.]+[KMBkmb]?$/) &&
                                     text !== username) {
                                     displayName = text;
                                     break;
@@ -613,9 +619,9 @@ class TikTokDiscoverer(AbstractDiscoverer):
 
                         // 6. Stats
                         const allText = card.textContent || "";
-                        const fMatch = allText.match(/([\d,.]+[KMBkmb]?)\s*[Ff]ollower/);
+                        const fMatch = allText.match(/([0-9,.]+[KMBkmb]?)[ \t]*[Ff]ollower/);
                         if (fMatch) followersText = fMatch[1] + " Followers";
-                        const lMatch = allText.match(/([\d,.]+[KMBkmb]?)\s*[Ll]ike/);
+                        const lMatch = allText.match(/([0-9,.]+[KMBkmb]?)[ \t]*[Ll]ike/);
                         if (lMatch) likesText = lMatch[1] + " Likes";
 
                         // 7. Verified badge
@@ -666,7 +672,9 @@ class TikTokDiscoverer(AbstractDiscoverer):
                     break
 
                 # 1. LAYER 2: SIGI_STATE extraction (highest priority)
-                await asyncio.sleep(2)
+                # Speed-mode-aware pre-extraction settle (was hardcoded 2s)
+                _mode = settings.DISCOVERY_SPEED_MODE
+                await asyncio.sleep(0.5 if _mode == "aggressive" else 1.0 if _mode == "balanced" else 2.0)
                 new_found = 0
 
                 try:
@@ -787,16 +795,26 @@ class TikTokDiscoverer(AbstractDiscoverer):
                     )
 
                 # 6. ANTI-BAN: Reading pauses & mouse jitter
-                if profiles_since_last_break >= 20:
+                # Speed-mode-aware: threshold and pause duration adjust
+                _mode = settings.DISCOVERY_SPEED_MODE
+                # TikTok-specific: more conservative thresholds than Facebook
+                _break_threshold = 20 if _mode == "stealth" else 30 if _mode == "balanced" else 50
+                if profiles_since_last_break >= _break_threshold:
                     profiles_since_last_break = 0
-                    try:
-                        await asyncio.wait_for(
-                            human.mouse_jitter(page, count=random.randint(2, 5)),
-                            timeout=5.0,
-                        )
-                    except Exception:
-                        pass
-                    pause_secs = random.uniform(3, 8)
+                    if _mode != "aggressive":  # skip jitter in aggressive
+                        try:
+                            await asyncio.wait_for(
+                                human.mouse_jitter(page, count=random.randint(1, 3)),
+                                timeout=5.0,
+                            )
+                        except Exception:
+                            pass
+                    if _mode == "stealth":
+                        pause_secs = random.uniform(3, 8)
+                    elif _mode == "balanced":
+                        pause_secs = random.uniform(1.5, 4)
+                    else:
+                        pause_secs = random.uniform(0.5, 1.5)
                     await asyncio.sleep(pause_secs)
 
                 # 7. DETECT END-OF-RESULTS
@@ -822,7 +840,9 @@ class TikTokDiscoverer(AbstractDiscoverer):
                         pass
 
                     if is_scrape_all and empty_scrolls > 3:
-                        extra_wait = min(empty_scrolls * 1.5, 10)
+                        _mode = settings.DISCOVERY_SPEED_MODE
+                        _multiplier = 0.5 if _mode == "aggressive" else 1.0 if _mode == "balanced" else 1.5
+                        extra_wait = min(empty_scrolls * _multiplier, 5 if _mode != "stealth" else 10)
                         await asyncio.sleep(extra_wait)
                 else:
                     empty_scrolls = 0
@@ -852,7 +872,11 @@ class TikTokDiscoverer(AbstractDiscoverer):
 
                 await human.pause("scroll")
 
-                if random.random() < 0.15:
+                # Speed-mode-aware jitter probability
+                # TikTok-specific: more conservative than Facebook (keep 10% in balanced)
+                _mode = settings.DISCOVERY_SPEED_MODE
+                _jitter_prob = 0.15 if _mode == "stealth" else 0.10 if _mode == "balanced" else 0.0
+                if _jitter_prob > 0 and random.random() < _jitter_prob:
                     try:
                         await asyncio.wait_for(
                             human.mouse_jitter(

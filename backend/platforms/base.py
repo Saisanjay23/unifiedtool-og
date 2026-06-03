@@ -36,6 +36,7 @@ class AbstractDiscoverer(ABC):
         keywords: list[str],
         max_results: int = 50,
         headless: bool = True,
+        use_free_proxy: bool = False,
         **kwargs,
     ) -> list[ProfileResult]:
         """

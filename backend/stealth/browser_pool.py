@@ -39,6 +39,7 @@ class BrowserPool:
         self._all_pages: list[Page] = []
         self._max_pages: int = 3
         self._platform: str = ""
+        self._headless: bool = True
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -56,6 +57,7 @@ class BrowserPool:
         pool = cls()
         pool._platform = platform
         pool._max_pages = max_pages
+        pool._headless = headless
 
         from backend.stealth.browser import create_stealth_browser
 
@@ -93,26 +95,103 @@ class BrowserPool:
         )
         return pool
 
+    async def _recreate_browser(self):
+        """Shutdown the dead browser and launch a fresh one, repopulating the pool."""
+        logger.info(f"{self._platform}: Self-healing: recreating browser process...")
+        # 1. Clear old queue
+        while not self._available_pages.empty():
+            try:
+                self._available_pages.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # 2. Shutdown old browser safely
+        try:
+            for page in list(self._all_pages):
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+            if self._browser:
+                await self._browser.close()
+            if self._pw:
+                await self._pw.stop()
+        except Exception:
+            pass
+
+        self._all_pages.clear()
+
+        # 3. Create fresh browser
+        from backend.stealth.browser import create_stealth_browser
+        try:
+            pw, browser, context, first_page = await create_stealth_browser(
+                platform=self._platform,
+                headless=self._headless,
+            )
+            self._pw = pw
+            self._browser = browser
+            self._context = context
+
+            self._all_pages.append(first_page)
+            await self._available_pages.put(first_page)
+
+            for i in range(self._max_pages - 1):
+                try:
+                    page = await context.new_page()
+                    page.set_default_timeout(settings.REQUEST_TIMEOUT_SEC * 1000)
+                    page.set_default_navigation_timeout(settings.REQUEST_TIMEOUT_SEC * 1000)
+                    self._all_pages.append(page)
+                    await self._available_pages.put(page)
+                except Exception as exc:
+                    logger.warning(f"Failed to create pool page {i+2} during restart: {exc}")
+                    break
+            
+            logger.info(f"{self._platform}: BrowserPool successfully self-healed and restarted.")
+        except Exception as e:
+            logger.error(f"{self._platform}: Critical error during self-healing: {e}")
+
     async def acquire_page(self, timeout: float = 120.0) -> Page:
         """
         Get a page from the pool. Blocks until one is available.
         If the page was closed/crashed, creates a replacement.
         """
-        page = await asyncio.wait_for(self._available_pages.get(), timeout=timeout)
+        if not self._browser or not self._browser.is_connected():
+            logger.warning(f"{self._platform}: Browser disconnected! Triggering self-healing restart...")
+            async with self._lock:
+                await self._recreate_browser()
+
+        try:
+            page = await asyncio.wait_for(self._available_pages.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"{self._platform}: Timeout waiting for available page! Re-initializing pool...")
+            async with self._lock:
+                await self._recreate_browser()
+            page = await asyncio.wait_for(self._available_pages.get(), timeout=10.0)
 
         # Validate the page is still alive
+        page_ok = False
         try:
-            if page.is_closed():
-                raise Exception("Page is closed")
-            await asyncio.wait_for(page.evaluate("1 + 1"), timeout=3.0)
+            if not page.is_closed():
+                await asyncio.wait_for(page.evaluate("1 + 1"), timeout=2.0)
+                page_ok = True
         except Exception:
+            pass
+
+        if not page_ok:
             logger.warning(f"{self._platform}: Pool page dead, creating replacement")
             async with self._lock:
                 try:
                     self._all_pages.remove(page)
                 except ValueError:
                     pass
-                page = await self._create_fresh_page()
+                
+                try:
+                    page = await self._create_fresh_page()
+                except Exception as exc:
+                    logger.warning(f"{self._platform}: Failed to create replacement page ({exc}). Restarting browser...")
+                    await self._recreate_browser()
+                    page = await asyncio.wait_for(self._available_pages.get(), timeout=10.0)
 
         return page
 

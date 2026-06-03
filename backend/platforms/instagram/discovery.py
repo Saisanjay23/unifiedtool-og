@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 import requests as req_lib
 
+from backend.core.config import settings
 from backend.core.db import ProfileResult
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractDiscoverer
@@ -38,6 +39,7 @@ class InstagramDiscoverer(AbstractDiscoverer):
         keywords: list[str],
         max_results: int = 50,
         headless: bool = True,
+        use_free_proxy: bool = False,
         **kwargs,
     ) -> list[ProfileResult]:
 
@@ -406,6 +408,7 @@ class InstagramDiscoverer(AbstractDiscoverer):
                         last_post_date=last_post_date,
                         profile_image_url=profile_pic_url,
                         profile_image_b64=profile_picture_b64,
+                        has_logo=bool(profile_pic_url or profile_picture_b64),
                         confidence=confidence,
                     )
 
@@ -420,9 +423,15 @@ class InstagramDiscoverer(AbstractDiscoverer):
                         result=profile_result.to_dict(),
                     )
 
-                    # Randomized delay — reduced from 4-8s to 1.5-3.5s
-                    # Still maintains anti-pattern variability but significantly faster
-                    await asyncio.sleep(random.uniform(1.5, 3.5))
+                    # Speed-mode-aware inter-profile delay
+                    # API-based: these delays are purely anti-rate-limit, no DOM concern
+                    _mode = settings.DISCOVERY_SPEED_MODE
+                    if _mode == "stealth":
+                        await asyncio.sleep(random.uniform(1.5, 3.5))
+                    elif _mode == "balanced":
+                        await asyncio.sleep(random.uniform(0.8, 1.5))
+                    else:  # aggressive
+                        await asyncio.sleep(random.uniform(0.3, 0.8))
 
                 except Exception as e:
                     logger.error(f"Error processing user {index}: {e}")

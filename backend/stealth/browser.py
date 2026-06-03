@@ -18,6 +18,7 @@ from playwright.async_api import (
 from backend.core.config import settings
 from backend.core.fs import atomic_write_json
 from backend.core.logger import get_logger
+from backend.stealth.free_proxy import get_working_free_proxy
 from backend.stealth.fingerprint import (
     DeviceProfileManager,
     get_audio_noise_script,
@@ -55,6 +56,7 @@ async def create_stealth_browser(
     headless: bool = True,
     session_file: str | None = None,
     block_ads: bool = False,
+    use_free_proxy: bool = False,
 ) -> tuple[Playwright, Browser, BrowserContext, Page]:
     """
     Launch a fully stealth-patched Chromium browser.
@@ -96,16 +98,26 @@ async def create_stealth_browser(
         }
 
         # Route through proxy — supports both single proxy and rotation
-        proxy_rotator = settings.get_proxy_rotator()
         proxy_url = None
-        if proxy_rotator:
-            proxy_url = proxy_rotator.next()
-            launch_opts["proxy"] = {"server": proxy_url}
-            logger.info(f"{platform}: Using rotated proxy {proxy_url} (pool of {proxy_rotator.count})")
-        elif settings.PROXY_URL:
-            proxy_url = settings.PROXY_URL
-            launch_opts["proxy"] = {"server": proxy_url}
-            logger.info(f"{platform}: Using proxy {proxy_url}")
+        logger.info(f"{platform}: use_free_proxy={use_free_proxy}")
+        if use_free_proxy:
+            proxy_url = await get_working_free_proxy()
+            if proxy_url:
+                launch_opts["proxy"] = {"server": proxy_url}
+                logger.info(f"{platform}: Using free public proxy {proxy_url}")
+            else:
+                logger.warning(f"{platform}: use_free_proxy requested but no working proxies found.")
+        
+        if not proxy_url:
+            proxy_rotator = settings.get_proxy_rotator()
+            if proxy_rotator:
+                proxy_url = proxy_rotator.next()
+                launch_opts["proxy"] = {"server": proxy_url}
+                logger.info(f"{platform}: Using rotated proxy {proxy_url} (pool of {proxy_rotator.count})")
+            elif settings.PROXY_URL:
+                proxy_url = settings.PROXY_URL
+                launch_opts["proxy"] = {"server": proxy_url}
+                logger.info(f"{platform}: Using proxy {proxy_url}")
 
         # DNS-over-HTTPS: when using a proxy, route DNS through Cloudflare's DoH
         # to prevent DNS leaks revealing which domains we're scraping.

@@ -36,6 +36,7 @@ class YouTubeDiscoverer(AbstractDiscoverer):
         keywords: list[str],
         max_results: int = 50,
         headless: bool = True,  # Unused for API
+        use_free_proxy: bool = False,
         **kwargs,
     ) -> list[ProfileResult]:
 
@@ -296,6 +297,7 @@ class YouTubeDiscoverer(AbstractDiscoverer):
                 username=custom_url or channel_id,
                 display_name=title,
                 profile_image_url=thumb_url,
+                has_logo=bool(thumb_url),
                 bio=desc,
                 followers=int(stats.get("subscriberCount", 0)),
                 post_count=int(stats.get("videoCount", 0)),

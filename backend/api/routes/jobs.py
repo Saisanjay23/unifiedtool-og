@@ -4,7 +4,10 @@ Handles creating, monitoring, and cancelling scraping jobs.
 """
 
 import asyncio
+import ipaddress
 import random
+import re
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -17,6 +20,44 @@ from backend.core.logger import get_logger
 router = APIRouter(tags=["jobs"])
 logger = get_logger("api.jobs")
 OFFICIAL_API_ANALYSIS_PLATFORMS = {"youtube", "telegram"}
+LOCAL_HOSTNAMES = {"localhost", "localhost.localdomain"}
+
+
+def _is_blocked_analysis_url(url: str) -> tuple[bool, str]:
+    """Reject URLs that could target local/private infrastructure."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return True, f"invalid URL scheme: {parsed.scheme or '<empty>'}"
+
+    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not hostname:
+        return True, "missing hostname"
+
+    if hostname in LOCAL_HOSTNAMES or hostname.endswith((".localhost", ".local")):
+        return True, f"local hostname targeted: {hostname}"
+
+    host_for_ip = hostname.strip("[]")
+    ip_obj = None
+    try:
+        ip_obj = ipaddress.ip_address(host_for_ip)
+    except ValueError:
+        if re.fullmatch(r"(?:0x[0-9a-f]+|\d+)", host_for_ip):
+            try:
+                ip_obj = ipaddress.ip_address(int(host_for_ip, 0))
+            except ValueError:
+                return True, f"suspicious numeric hostname: {host_for_ip}"
+
+    if ip_obj and (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    ):
+        return True, f"non-public IP targeted: {ip_obj}"
+
+    return False, ""
 
 
 class CreateJobRequest(BaseModel):
@@ -27,6 +68,7 @@ class CreateJobRequest(BaseModel):
     max_results: int = 50
     headless: bool = True
     search_type: str = "people"  # "people", "pages", or "both" (discovery only)
+    use_free_proxy: bool = False  # Fetch and use a free public proxy (for region bypass)
 
 
 @router.post("/jobs")
@@ -71,6 +113,7 @@ async def create_job(req: CreateJobRequest):
             "max_results": req.max_results,
             "headless": req.headless,
             "search_type": req.search_type,
+            "use_free_proxy": getattr(req, "use_free_proxy", False),
         },
     )
 
@@ -112,16 +155,21 @@ import base64
 
 async def _ensure_profile_image_b64(result_obj):
     """
-    Universally download the profile image to base64 if it's missing.
+    Download the profile image to base64 if it's missing.
     This bypasses frontend CORS/CORP blocks for CDN URLs (e.g. Facebook, Instagram).
+    
+    IMPORTANT: This function NEVER modifies has_logo.
+    The platform analysis module is the sole authority on whether has_logo is True/False.
+    This function only downloads the image bytes for frontend display purposes.
     """
     img_url = getattr(result_obj, "profile_image_url", None)
     img_b64 = getattr(result_obj, "profile_image_b64", None)
+
     if img_url and not img_b64:
         # Don't try to download data URIs or empty strings
         if img_url.startswith("data:") or len(img_url) < 10:
             return
-            
+
         import requests as req_lib
         try:
             # Determine platform context for referrer
@@ -135,7 +183,7 @@ async def _ensure_profile_image_b64(result_obj):
                 "tiktok": "https://www.tiktok.com/",
             }
             referer = referer_map.get(plat, f"https://www.{plat}.com/")
-                
+
             img_resp = await asyncio.to_thread(
                 lambda: req_lib.get(
                     img_url,
@@ -154,12 +202,13 @@ async def _ensure_profile_image_b64(result_obj):
 
             if img_resp.status_code == 200 and len(img_resp.content) > 500:
                 result_obj.profile_image_b64 = base64.b64encode(img_resp.content).decode("utf-8")
-                result_obj.has_logo = True  # Globally signify we have an image
+                # NOTE: has_logo is NOT modified here. Platform module owns that decision.
             else:
                 logger.warning(f"Universal image downloader got HTTP {img_resp.status_code} "
                                f"Length {len(img_resp.content)} for {img_url[:50]}...")
         except Exception as e:
             logger.warning(f"Universal image downloader failed for {img_url[:50]}: {e}")
+
 
 def _build_run_function(platform: str, mode: str, health: HealthManager):
     """
@@ -179,6 +228,7 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
             max_results=50,
             headless=True,
             search_type="people",
+            use_free_proxy=False,
         ):
 
             async def wrapped_cb(event_type, **kw):
@@ -211,6 +261,7 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
                         max_results=max_results,
                         headless=headless,
                         search_type=search_type,
+                        use_free_proxy=use_free_proxy,
                     ),
                     timeout=settings.REQUEST_TIMEOUT_SEC * (20 if max_results >= 9999 else 10) * max(1, len(keywords)),
                 )
@@ -228,8 +279,6 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
             return None
 
         async def run_analysis(progress_callback, client, keywords, headless=True, **kwargs):
-            from urllib.parse import urlparse
-
             from backend.stealth.browser_pool import BrowserPool
 
             urls = keywords
@@ -237,17 +286,21 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
             progress_lock = asyncio.Lock()
             is_official_api_platform = platform in OFFICIAL_API_ANALYSIS_PLATFORMS
 
-            # Validate all URLs first (SSRF protection)
+            # Validate and deduplicate all URLs first (SSRF protection & performance)
             valid_urls = []
+            seen_urls = set()
             for url in urls:
-                parsed = urlparse(url)
-                if parsed.scheme not in ("http", "https") or parsed.scheme == "file":
-                    logger.warning(f"SSRF attempt blocked. Invalid URL scheme: {url}")
+                if not url:
                     continue
-                if parsed.hostname in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
-                    logger.warning(f"SSRF attempt blocked. Localhost targeted: {url}")
+                url_clean = url.strip()
+                if url_clean in seen_urls:
                     continue
-                valid_urls.append(url)
+                is_blocked, reason = _is_blocked_analysis_url(url_clean)
+                if is_blocked:
+                    logger.warning(f"SSRF attempt blocked ({reason}): {url_clean}")
+                    continue
+                valid_urls.append(url_clean)
+                seen_urls.add(url_clean)
 
             if not valid_urls:
                 return
@@ -282,7 +335,7 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
 
                     async def analyze_one(url, idx):
                         nonlocal completed
-                        page = await pool.acquire_page()
+                        page = None
                         try:
                             async with progress_lock:
                                 await progress_callback(
@@ -291,6 +344,8 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
                                     count_found=completed,
                                     count_total=total,
                                 )
+
+                            page = await pool.acquire_page()
 
                             result = await asyncio.wait_for(
                                 analyzer.analyze_with_page(
@@ -331,7 +386,8 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
                                     count_total=total,
                                 )
                         finally:
-                            await pool.release_page(page)
+                            if page:
+                                await pool.release_page(page)
 
                     # Run batch concurrently
                     tasks = [
@@ -343,7 +399,7 @@ def _build_run_function(platform: str, mode: str, health: HealthManager):
                     # Anti-ban: small delay between batches
                     if batch_start + batch_size < len(valid_urls):
                         if inter_batch_delay > 0:
-                            delay = inter_batch_delay + random.uniform(0.5, 1.5)
+                            delay = inter_batch_delay + random.uniform(0.1, 0.5)
                             await asyncio.sleep(delay)
 
             finally:

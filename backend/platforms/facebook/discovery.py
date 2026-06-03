@@ -11,6 +11,8 @@ import json
 import random
 import re
 
+from backend.core.config import settings
+
 from backend.core.db import ProfileResult
 from backend.core.logger import get_logger
 from backend.platforms.base import AbstractDiscoverer
@@ -77,6 +79,8 @@ class FacebookDiscoverer(AbstractDiscoverer):
         max_results: int = 50,
         headless: bool = True,
         search_type: str = "people",
+        use_free_proxy: bool = False,
+        **kwargs,
     ) -> list[ProfileResult]:
         from backend.stealth.browser import create_stealth_browser
 
@@ -91,6 +95,7 @@ class FacebookDiscoverer(AbstractDiscoverer):
         pw, browser, context, page = await create_stealth_browser(
             platform="facebook",
             headless=headless,
+            use_free_proxy=use_free_proxy,
         )
         logger.info("Browser created successfully for discovery.")
 
@@ -266,9 +271,13 @@ class FacebookDiscoverer(AbstractDiscoverer):
                 )
             except Exception:
                 logger.debug(f"Wait for feed selector timed out for '{keyword}', proceeding anyway.")
-                await asyncio.sleep(5)
+                # Speed-mode-aware fallback wait (was hardcoded 5s)
+                _mode = settings.DISCOVERY_SPEED_MODE
+                await asyncio.sleep(1.0 if _mode == "aggressive" else 2.0 if _mode == "balanced" else 5.0)
 
-            await asyncio.sleep(2)
+            # Speed-mode-aware post-render settle (was hardcoded 2s)
+            _mode = settings.DISCOVERY_SPEED_MODE
+            await asyncio.sleep(0.3 if _mode == "aggressive" else 0.8 if _mode == "balanced" else 2.0)
 
             empty_scrolls = 0
             last_scroll_height = 0
@@ -319,7 +328,7 @@ class FacebookDiscoverer(AbstractDiscoverer):
                             
                             if (href.startsWith('/')) href = "https://www.facebook.com" + href;
                             
-                            let clean = href.split('?')[0].replace(/\/$/, '');
+                            let clean = href.split('?')[0].replace(/\\/$/, '');
                             if (href.includes('profile.php')) {
                                 const urlObj = new URL(href, window.location.origin);
                                 const id = urlObj.searchParams.get('id');
@@ -456,14 +465,23 @@ class FacebookDiscoverer(AbstractDiscoverer):
 
                 # -----------------------------------------------------------
                 # 3. ANTI-BAN: Reading pauses & mouse jitter
+                # Speed-mode-aware: threshold and pause duration adjust
                 # -----------------------------------------------------------
-                if profiles_since_last_break >= 20:
+                _mode = settings.DISCOVERY_SPEED_MODE
+                _break_threshold = 20 if _mode == "stealth" else 40 if _mode == "balanced" else 80
+                if profiles_since_last_break >= _break_threshold:
                     profiles_since_last_break = 0
-                    try:
-                        await asyncio.wait_for(human.mouse_jitter(page, count=random.randint(2, 5)), timeout=5.0)
-                    except Exception:
-                        pass
-                    pause_secs = random.uniform(3, 8)
+                    if _mode != "aggressive":  # skip jitter entirely in aggressive
+                        try:
+                            await asyncio.wait_for(human.mouse_jitter(page, count=random.randint(1, 3)), timeout=5.0)
+                        except Exception:
+                            pass
+                    if _mode == "stealth":
+                        pause_secs = random.uniform(3, 8)
+                    elif _mode == "balanced":
+                        pause_secs = random.uniform(1, 3)
+                    else:
+                        pause_secs = random.uniform(0.3, 0.8)
                     await asyncio.sleep(pause_secs)
 
                 # -----------------------------------------------------------
@@ -503,7 +521,18 @@ class FacebookDiscoverer(AbstractDiscoverer):
                             timeout=5.0
                         )
                         if clicked:
-                            await asyncio.sleep(3)
+                            # Smart wait: wait for scroll height to change (content loading)
+                            # instead of a dumb fixed 3s sleep
+                            try:
+                                _pre_height = await page.evaluate("() => document.body.scrollHeight")
+                                await page.wait_for_function(
+                                    f"() => document.body.scrollHeight > {_pre_height}",
+                                    timeout=3000,
+                                )
+                            except Exception:
+                                # Fallback: speed-mode-aware fixed wait
+                                _mode = settings.DISCOVERY_SPEED_MODE
+                                await asyncio.sleep(0.5 if _mode == "aggressive" else 1.0 if _mode == "balanced" else 3.0)
                             see_more_clicked = True
                             empty_scrolls = max(0, empty_scrolls - 2)
                     except Exception:
@@ -524,7 +553,9 @@ class FacebookDiscoverer(AbstractDiscoverer):
                             pass
 
                     if is_scrape_all and empty_scrolls > 3:
-                        extra_wait = min(empty_scrolls * 1.5, 10)
+                        _mode = settings.DISCOVERY_SPEED_MODE
+                        _multiplier = 0.3 if _mode == "aggressive" else 0.7 if _mode == "balanced" else 1.5
+                        extra_wait = min(empty_scrolls * _multiplier, 5 if _mode != "stealth" else 10)
                         await asyncio.sleep(extra_wait)
                 else:
                     empty_scrolls = 0
@@ -548,7 +579,10 @@ class FacebookDiscoverer(AbstractDiscoverer):
                     
                 await human.pause("scroll")
 
-                if random.random() < 0.15:
+                # Speed-mode-aware jitter probability: 15% stealth, 5% balanced, 0% aggressive
+                _mode = settings.DISCOVERY_SPEED_MODE
+                _jitter_prob = 0.15 if _mode == "stealth" else 0.05 if _mode == "balanced" else 0.0
+                if _jitter_prob > 0 and random.random() < _jitter_prob:
                     try:
                         await asyncio.wait_for(human.mouse_jitter(page, count=random.randint(1, 3)), timeout=5.0)
                     except Exception:

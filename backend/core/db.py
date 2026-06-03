@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from bson import ObjectId  # type: ignore
+from bson.errors import InvalidId  # type: ignore
 from motor.motor_asyncio import AsyncIOMotorClient  # type: ignore
 from pymongo.errors import AutoReconnect, PyMongoError, ServerSelectionTimeoutError  # type: ignore
 from tenacity import (  # type: ignore
@@ -30,6 +32,14 @@ PRESETS_COLLECTION = "keyword_presets"
 GLOBAL_CLIENTS_COLLECTION = "clients"  # Store clients globally
 
 SUPPORTED_PLATFORMS = ["facebook", "instagram", "twitter", "youtube", "telegram", "tiktok"]
+
+
+def _safe_object_id(doc_id: str) -> ObjectId | None:
+    """Return a BSON ObjectId or None for malformed client-supplied IDs."""
+    try:
+        return ObjectId(doc_id)
+    except (InvalidId, TypeError):
+        return None
 
 
 @dataclass
@@ -141,6 +151,19 @@ async def init_indexes():
         await coll.create_index(
             [("client_name", 1), ("status", 1)],
             name="idx_client_status",
+        )
+        # newest results for one client, with and without status filters
+        await coll.create_index(
+            [("client_name", 1), ("last_seen", -1)],
+            name="idx_client_last_seen",
+        )
+        await coll.create_index(
+            [("client_name", 1), ("status", 1), ("last_seen", -1)],
+            name="idx_client_status_last_seen",
+        )
+        await coll.create_index(
+            [("client_name", 1), ("confidence", 1), ("last_seen", -1)],
+            name="idx_client_confidence_last_seen",
         )
         # sorting by newest
         await coll.create_index(
@@ -337,27 +360,31 @@ async def get_results(
         # Get total count for pagination
         total_count += await coll.count_documents(query)
 
-        cursor = (
-            coll.find(query)
-            .sort("last_seen", -1)
-            .limit(offset + limit)
-        )
+        cursor = coll.find(query).sort("last_seen", -1)
+        if platform:
+            cursor = cursor.skip(offset).limit(limit)
+        else:
+            cursor = cursor.limit(offset + limit)
         async for doc in cursor:
             doc["_id"] = str(doc["_id"])
             doc["platform"] = plat
             all_results.append(doc)
 
-    # re-sort across platforms by last_seen (newest first)
-    all_results.sort(key=lambda d: d.get("last_seen", datetime.min), reverse=True)
-    return all_results[offset : offset + limit], total_count  # type: ignore
+    if platform:
+        return all_results, total_count
+    else:
+        # re-sort across platforms by last_seen (newest first)
+        all_results.sort(key=lambda d: d.get("last_seen", datetime.min), reverse=True)
+        return all_results[offset : offset + limit], total_count  # type: ignore
 
 
 async def get_result_full(doc_id: str, platform: str) -> dict | None:
     """Fetch a single result with all fields (including images)."""
-    from bson import ObjectId  # type: ignore
-
+    object_id = _safe_object_id(doc_id)
+    if object_id is None:
+        return None
     coll = get_collection(platform)
-    doc = await coll.find_one({"_id": ObjectId(doc_id)})
+    doc = await coll.find_one({"_id": object_id})
     if doc:
         doc["_id"] = str(doc["_id"])
     return doc
@@ -365,11 +392,12 @@ async def get_result_full(doc_id: str, platform: str) -> dict | None:
 
 async def update_status(doc_id: str, platform: str, new_status: str) -> bool:
     """Update the status (pending/approved/rejected) of a record."""
-    from bson import ObjectId  # type: ignore
-
+    object_id = _safe_object_id(doc_id)
+    if object_id is None:
+        return False
     coll = get_collection(platform)
     result = await coll.update_one(
-        {"_id": ObjectId(doc_id)},
+        {"_id": object_id},
         {"$set": {"status": new_status, "last_seen": datetime.now(timezone.utc)}},
     )
     return result.modified_count > 0
@@ -393,18 +421,20 @@ async def update_fields(doc_id: str, platform: str, fields: dict) -> bool:
     Executes a partial document mutation. 
     Guarded by an explicit whitelist (`EDITABLE_FIELDS`) to prevent arbitrary injection or schema pollution.
     """
-    from bson import ObjectId  # type: ignore
-
     # only allow whitelisted fields
     safe_fields = {k: v for k, v in fields.items() if k in EDITABLE_FIELDS}
     if not safe_fields:
+        return False
+
+    object_id = _safe_object_id(doc_id)
+    if object_id is None:
         return False
 
     safe_fields["last_seen"] = datetime.now(timezone.utc)
 
     coll = get_collection(platform)
     result = await coll.update_one(
-        {"_id": ObjectId(doc_id)},
+        {"_id": object_id},
         {"$set": safe_fields},
     )
     return result.modified_count > 0

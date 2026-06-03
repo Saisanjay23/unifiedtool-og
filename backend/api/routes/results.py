@@ -28,6 +28,31 @@ router = APIRouter(tags=["results"])
 logger = get_logger("api.results")
 
 
+def _format_excel_date(created_val) -> str:
+    """Format creation dates to DD-MMM-YY (e.g., 05-Nov-19) for Excel export."""
+    if not created_val:
+        return ""
+    created_str = str(created_val).strip()
+    
+    # Try common formats first
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(created_str, fmt)
+            return dt.strftime("%d-%b-%y")
+        except ValueError:
+            continue
+            
+    # Robust dateutil fallback
+    try:
+        from dateutil.parser import parse as date_parse
+        dt = date_parse(created_str)
+        return dt.strftime("%d-%b-%y")
+    except Exception:
+        pass
+        
+    return created_str
+
+
 # ─── Request Models ──────────────────────────────────────────────────────────
 
 
@@ -294,7 +319,7 @@ async def export_results(
             "Original feed": "",
             "IMPERSONATED": r.get("url", ""),
             "Profile name": r.get("display_name", r.get("username", "")),
-            "Created Date": r.get("created_at", ""),
+            "Created Date": _format_excel_date(r.get("created_at", "")),
             "Logo (Yes / No)": "Yes" if r.get("has_logo") else "No",
             "Followers": r.get("followers", 0) or 0,
             "Active (Yes / No)": "Yes" if r.get("is_active") else "No",
@@ -307,18 +332,7 @@ async def export_results(
             "priority": r.get("priority", "Low"),
             "Date": datetime.now().strftime("%d-%m-%Y"),
             "Comments": r.get("comments", ""),
-            "Platform": r.get("platform", ""),
-            "Keyword": r.get("keyword", ""),
-            "Username": r.get("username", ""),
-            "Bio": r.get("bio", ""),
-            "Verified": "Yes" if r.get("is_verified") else "No",
-            "Status": r.get("status", "pending"),
         }
-
-        # Handle keywords list
-        kws = r.get("keywords", [])
-        if isinstance(kws, list) and kws:
-            row["Keyword"] = ", ".join(kws)
 
         rows.append(row)
 
@@ -459,7 +473,7 @@ async def export_memory_results(client: str, req: ExportMemoryRequest):
             "Original feed": "",
             "IMPERSONATED": r.get("url", ""),
             "Profile name": r.get("display_name", r.get("username", "")),
-            "Created Date": r.get("created_at", ""),
+            "Created Date": _format_excel_date(r.get("created_at", "")),
             "Logo (Yes / No)": "Yes" if r.get("has_logo") else "No",
             "Followers": r.get("followers", 0) or 0,
             "Active (Yes / No)": "Yes" if r.get("is_active") else "No",
@@ -472,17 +486,7 @@ async def export_memory_results(client: str, req: ExportMemoryRequest):
             "priority": r.get("priority", "Low"),
             "Date": datetime.now().strftime("%d-%m-%Y"),
             "Comments": r.get("comments", ""),
-            "Platform": r.get("platform", ""),
-            "Keyword": r.get("keyword", ""),
-            "Username": r.get("username", ""),
-            "Bio": r.get("bio", ""),
-            "Verified": "Yes" if r.get("is_verified") else "No",
-            "Status": r.get("status", "pending"),
         }
-
-        kws = r.get("keywords", [])
-        if isinstance(kws, list) and kws:
-            row["Keyword"] = ", ".join(kws)
 
         rows.append(row)
         screenshots.append(r.get("screenshot_b64"))

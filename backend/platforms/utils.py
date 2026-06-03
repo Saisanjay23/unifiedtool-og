@@ -22,6 +22,105 @@ _DL_USER_AGENT = (
     "Chrome/134.0.0.0 Safari/537.36"
 )
 
+# ─── Centralized Default Avatar / Placeholder Detection ──────────────────────
+#
+# Every platform has its own "no profile picture" default image.  The old code
+# checked in some platforms but missed others, leading to false `has_logo=True`.
+# This single function is the authoritative gate for ALL platforms.
+
+# URL substrings that indicate a default / placeholder avatar
+_DEFAULT_AVATAR_URL_PATTERNS = [
+    # ── Facebook ──
+    "static.xx",            # Facebook CDN static assets (silhouettes)
+    "rsrc.php",             # Facebook resource bundles
+    "silhouette",           # Generic silhouette pattern
+    "guest",                # Guest user
+    "default_profile",      # Generic default
+    "avatar_empty",         # Empty avatar
+    "blank_profile",        # Blank profile
+    "1x1",                  # 1x1 pixel placeholder
+    "emoji",                # Emoji placeholder
+    # ── Twitter / X ──
+    "default_profile_images",  # Twitter's official default egg/silhouette
+    "default_profile_normal",  # Older Twitter default
+    "sticky/default_profile",  # Another Twitter default path
+    # ── Instagram ──
+    "44884218_345707102882519_2446069589734326272",  # Instagram's default PFP image ID
+    "instagram.com/static",  # Instagram static assets
+    "cdninstagram.com/v/t51.2885-19/44884218",  # Specific default PFP
+    "/anonymousUser",        # Instagram anonymous user
+    # ── YouTube ──
+    "yt3.ggpht.com/a/default",   # YouTube default channel avatar
+    "yt3.ggpht.com/a-/default",  # YouTube default variant
+    "yt3.ggpht.com/a/default-user",  # YouTube default user
+    # ── TikTok ──
+    "musically-maliva",     # Old Musical.ly default avatars
+    "tiktok-obj/default",   # TikTok default object
+    "default_avatar",       # TikTok default avatar
+    # ── General ──
+    "placeholder",
+    "no-image",
+    "no_image",
+    "noimage",
+    "avatar_default",
+    "default-avatar",
+    "default_avatar",
+    "missing.png",
+    "blank.png",
+    "empty.png",
+    "null",
+]
+
+
+def is_real_profile_image(
+    url: str | None = None,
+    image_bytes: bytes | None = None,
+    image_b64: str | None = None,
+) -> bool:
+    """
+    Determine whether a profile image URL / downloaded data represents a REAL
+    user-uploaded profile picture vs. a platform default / placeholder.
+
+    Args:
+        url: The profile image URL (checked against known default patterns).
+        image_bytes: Raw downloaded image bytes (checked for minimum size).
+        image_b64: Base64-encoded image string (checked for minimum size).
+
+    Returns:
+        True only if the image is very likely a real, user-uploaded picture.
+    """
+    # ── Gate 1: URL pattern check ──
+    if url:
+        url_lower = url.lower()
+        # Must be an actual HTTP URL
+        if "http" not in url_lower:
+            return False
+        # Check against known default/placeholder patterns
+        for pattern in _DEFAULT_AVATAR_URL_PATTERNS:
+            if pattern.lower() in url_lower:
+                logger.debug(f"Default avatar detected via URL pattern '{pattern}': {url[:80]}")
+                return False
+
+    # ── Gate 2: Image data size check ──
+    # Real profile pictures (even small company logos) are almost always >500 bytes.
+    # Platform defaults and error responses (transparent PNGs, 1x1 GIFs) are much smaller.
+    if image_bytes is not None:
+        if len(image_bytes) < 500:
+            logger.debug(f"Image too small ({len(image_bytes)} bytes) — likely placeholder")
+            return False
+
+    if image_b64 is not None:
+        # Base64 is ~33% larger than raw bytes, so 500 bytes ≈ 666 b64 chars
+        if len(image_b64) < 700:
+            logger.debug(f"Base64 image too small ({len(image_b64)} chars) — likely placeholder")
+            return False
+
+    # ── Gate 3: Must have at least a URL or actual image data ──
+    if not url and not image_bytes and not image_b64:
+        return False
+
+    return True
+
 
 def parse_followers(s) -> int:
     """
@@ -230,3 +329,38 @@ async def download_profile_image(
     except Exception as exc:
         logger.debug(f"Image download failed for {image_url[:80]}: {exc}")
     return None
+
+
+def repair_telegram_session(session_path: str):
+    """
+    Validates the sqlite schema of the telegram session file to ensure compatibility
+    with Telethon's SQLiteSession. Removes the extra 'tmp_auth_key' column from 'sessions'
+    table if present, which would otherwise trigger 'ValueError: too many values to unpack (expected 5, got 6)'.
+    """
+    import os
+    import sqlite3
+
+    db_path = session_path
+    if not db_path.endswith(".session"):
+        db_path += ".session"
+
+    if not os.path.exists(db_path):
+        return
+
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(sessions)")
+        columns = [info[1] for info in c.fetchall()]
+        if "tmp_auth_key" in columns:
+            logger.info(f"Removing incompatible 'tmp_auth_key' column from {db_path}...")
+            c.execute("CREATE TABLE sessions_backup (dc_id integer primary key, server_address text, port integer, auth_key blob, takeout_id integer)")
+            c.execute("INSERT INTO sessions_backup SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions")
+            c.execute("DROP TABLE sessions")
+            c.execute("ALTER TABLE sessions_backup RENAME TO sessions")
+            conn.commit()
+            logger.info("Successfully repaired telegram.session schema!")
+        conn.close()
+    except Exception as exc:
+        logger.warning(f"Failed to inspect or repair telegram.session at {db_path}: {exc}")
+

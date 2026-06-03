@@ -7,17 +7,12 @@ Inspired by Scrapling's Fetcher class. Use for operations that don't need
 JS rendering: API calls, image downloads, session validation, URL checks.
 
 Usage:
-    # Sync
     with StealthHTTP() as client:
         resp = client.get("https://api.example.com/data")
 
-    # Async
-    async with AsyncStealthHTTP() as client:
-        resp = await client.get("https://api.example.com/data")
-
     # With proxy
-    async with AsyncStealthHTTP(proxy="socks5://proxy:1080") as client:
-        resp = await client.get("https://api.example.com/data")
+    with StealthHTTP(proxy="socks5://proxy:1080") as client:
+        resp = client.get("https://api.example.com/data")
 
 Do NOT use for pages requiring JavaScript rendering — use create_stealth_browser() instead.
 """
@@ -108,60 +103,3 @@ class StealthHTTP:
         self.close()
 
 
-class AsyncStealthHTTP:
-    """
-    Asynchronous HTTP client with browser TLS fingerprint impersonation.
-    Use for concurrent API calls, image downloads, and validation checks.
-    """
-
-    def __init__(
-        self,
-        impersonate: str = DEFAULT_IMPERSONATE,
-        proxy: str | None = None,
-        timeout: int = 30,
-    ):
-        if not _check_curl_cffi():
-            raise ImportError("curl_cffi is required for AsyncStealthHTTP")
-
-        from curl_cffi.requests import AsyncSession
-
-        self._session = AsyncSession(
-            impersonate=impersonate,
-            proxy=proxy,
-            timeout=timeout,
-        )
-        self._impersonate = impersonate
-        logger.debug(f"AsyncStealthHTTP created (impersonate={impersonate})")
-
-    async def get(self, url: str, **kwargs):
-        """Async HTTP GET with browser TLS fingerprint."""
-        return await self._session.get(url, **kwargs)
-
-    async def post(self, url: str, **kwargs):
-        """Async HTTP POST with browser TLS fingerprint."""
-        return await self._session.post(url, **kwargs)
-
-    async def put(self, url: str, **kwargs):
-        """Async HTTP PUT with browser TLS fingerprint."""
-        return await self._session.put(url, **kwargs)
-
-    async def delete(self, url: str, **kwargs):
-        """Async HTTP DELETE with browser TLS fingerprint."""
-        return await self._session.delete(url, **kwargs)
-
-    async def head(self, url: str, **kwargs):
-        """Async HTTP HEAD with browser TLS fingerprint."""
-        return await self._session.head(url, **kwargs)
-
-    async def close(self):
-        """Close the underlying async session."""
-        try:
-            await self._session.close()
-        except Exception:
-            pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        await self.close()
