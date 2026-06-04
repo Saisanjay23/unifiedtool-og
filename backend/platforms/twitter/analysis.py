@@ -299,7 +299,16 @@ class TwitterAnalyzer(AbstractAnalyzer):
 
             # ── Step 1: Navigate ──
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                target_url = url
+                if "lang=" not in target_url:
+                    if "?" in target_url:
+                        target_url = f"{target_url}&lang=en"
+                    else:
+                        target_url = f"{target_url}?lang=en"
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+
+                if "login" in page.url:
+                    error_comments.append("Redirected to Login (Please log in via Session Manager)")
 
                 # Wait for UserName to appear (reduced timeout for speed)
                 await page.wait_for_selector(

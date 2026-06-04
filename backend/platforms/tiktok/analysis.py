@@ -182,7 +182,18 @@ class TikTokAnalyzer(AbstractAnalyzer):
             navigation_success = False
             for nav_attempt in range(3):
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    target_url = url
+                    if "lang=" not in target_url:
+                        if "?" in target_url:
+                            target_url = f"{target_url}&lang=en"
+                        else:
+                            target_url = f"{target_url}?lang=en"
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                    
+                    if "login" in page.url:
+                        if "Redirected to Login (Please log in via Session Manager)" not in error_comments:
+                            error_comments.append("Redirected to Login (Please log in via Session Manager)")
+                            
                     navigation_success = True
                     break
                 except Exception as e:

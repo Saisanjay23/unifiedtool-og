@@ -349,9 +349,15 @@ class InstagramAnalyzer(AbstractAnalyzer):
 
             # ── Step 1: Navigate ──
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                target_url = url
+                if "hl=" not in target_url:
+                    if "?" in target_url:
+                        target_url = f"{target_url}&hl=en"
+                    else:
+                        target_url = f"{target_url}?hl=en"
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
                 if "/accounts/login" in page.url:
-                    error_comments.append("Redirected to Login")
+                    error_comments.append("Redirected to Login (Please log in via Session Manager)")
                 if "/challenge/" in page.url:
                     error_comments.append("Challenge Required — re-login needed")
                     logger.warning(f"[{url}] Instagram challenge redirect detected: {page.url}")
