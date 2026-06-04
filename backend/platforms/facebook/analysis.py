@@ -1142,28 +1142,44 @@ class FacebookAnalyzer(AbstractAnalyzer):
             if not profile_name:
                 profile_name = "Unknown"
 
-            # ── 4. FOLLOWERS ─────────────────────────────────────────
+            # ── 4. FOLLOWERS / FRIENDS ───────────────────────────────
             followers = 0
 
             # Parse true follower metrics from body text.
             followers_from_text = 0
-
             if body_text_head:
                 f_m = re.search(r"([\d,.]+K?M?)\s+followers", body_text_head, re.IGNORECASE)
                 if f_m:
                     followers_from_text = parse_followers(f_m.group(1))
 
-            # Compile true follower candidates only.
+            # Parse friends metrics from body text.
+            friends_from_text = 0
+            if body_text_head:
+                fr_m = re.search(r"([\d,.]+K?M?)\s+friends", body_text_head, re.IGNORECASE)
+                if fr_m:
+                    friends_from_text = parse_followers(fr_m.group(1))
+
+            # Compile follower candidates.
             json_ld_followers = bulk_data.get("json_ld_followers", 0)
             net_followers = captured_network.get("followers", 0)
             dom_followers = bulk_data.get("dom_followers", 0)
             resolved_followers = json_ld_followers or net_followers or followers_from_text or dom_followers
 
-            # Keep the canonical followers field semantically strict. Likes,
-            # friends, generic InteractionCount, and title-only numbers are
-            # intentionally not mapped into followers because they can inflate
-            # risk scoring and exports with the wrong metric.
-            followers = resolved_followers
+            # Compile friends candidates.
+            net_friends = captured_network.get("friends", 0)
+            dom_friends = bulk_data.get("dom_friends", 0)
+            resolved_friends = net_friends or dom_friends or friends_from_text
+
+            # Map to the canonical followers field. We prioritize true followers,
+            # but for personal profiles that only have friends, we map friends count.
+            if resolved_followers:
+                followers = resolved_followers
+                logger.info(f"Resolved followers count: {followers} (followers)")
+            elif resolved_friends:
+                followers = resolved_friends
+                logger.info(f"Resolved followers count from friends: {followers} (friends)")
+            else:
+                followers = 0
 
             if page_state_issue:
                 followers = 0

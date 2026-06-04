@@ -39,7 +39,7 @@ async def test_facebook_profile_fixture():
         location = _clean_location_candidate(dom_location_link)
         assert location == "Ahemdabad, 380001"
 
-        # 4. Extract followers without mapping friends into followers
+        # 4. Extract followers and fallback to friends count for personal profiles
         body_text_head = bulk_data.get("body_text_head", "")
         
         followers_from_text = 0
@@ -48,6 +48,12 @@ async def test_facebook_profile_fixture():
             if f_m:
                 followers_from_text = parse_followers(f_m.group(1))
 
+        friends_from_text = 0
+        if body_text_head:
+            fr_m = re.search(r"([\d,.]+K?M?)\s+friends", body_text_head, re.IGNORECASE)
+            if fr_m:
+                friends_from_text = parse_followers(fr_m.group(1))
+
         dom_followers = bulk_data.get("dom_followers", 0)
         dom_friends = bulk_data.get("dom_friends", 0)
 
@@ -55,9 +61,10 @@ async def test_facebook_profile_fixture():
         assert dom_followers == 0
         
         resolved_followers = followers_from_text or dom_followers
+        resolved_friends = dom_friends or friends_from_text
 
-        followers = resolved_followers
-        assert followers == 0
+        followers = resolved_followers or resolved_friends
+        assert followers == 500
 
         # 5. Extract creation dates
         text_dates = bulk_data.get("text_dates", [])
