@@ -2,7 +2,7 @@
 
 ## Supported Runtime
 
-The application currently supports Python `>=3.10,<3.15`. Python 3.11 remains the recommended version for the most consistent Playwright/browser behavior.
+The application currently supports Python `>=3.11`. Python 3.11 remains the recommended version for the most consistent Playwright/browser behavior.
 
 Use `GET /health` to inspect the active Python version, project root, current working directory, worker count, and runtime warnings.
 

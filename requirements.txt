@@ -1,6 +1,7 @@
 # Unified Social Media Tool v2 — Python Dependencies
 # Recommended runtime: Python 3.11
-# Supported runtime range: Python >=3.10,<3.15
+# Supported runtime range: Python >=3.11
+
 
 # Core web framework
 fastapi==0.115.6

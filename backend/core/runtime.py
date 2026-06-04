@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MIN_SUPPORTED_PYTHON = (3, 10)
-MAX_SUPPORTED_PYTHON = (3, 15)
+MIN_SUPPORTED_PYTHON = (3, 11)
 RECOMMENDED_PYTHON = (3, 11)
 
 
@@ -39,11 +38,10 @@ def validate_python_runtime(raise_on_error: bool = False) -> list[str]:
     current = sys.version_info[:2]
     warnings: list[str] = []
 
-    if current < MIN_SUPPORTED_PYTHON or current >= MAX_SUPPORTED_PYTHON:
+    if current < MIN_SUPPORTED_PYTHON:
         message = (
             f"Unsupported Python {sys.version.split()[0]}. "
-            f"Use Python >= {_version_label(MIN_SUPPORTED_PYTHON)} and "
-            f"< {_version_label(MAX_SUPPORTED_PYTHON)} "
+            f"Use Python >= {_version_label(MIN_SUPPORTED_PYTHON)} "
             f"(recommended {_version_label(RECOMMENDED_PYTHON)})."
         )
         if raise_on_error:
@@ -88,10 +86,7 @@ def get_runtime_info() -> dict[str, Any]:
     return {
         "python_version": sys.version.split()[0],
         "recommended_python": _version_label(RECOMMENDED_PYTHON),
-        "supported_python": (
-            f">={_version_label(MIN_SUPPORTED_PYTHON)},"
-            f"<{_version_label(MAX_SUPPORTED_PYTHON)}"
-        ),
+        "supported_python": f">={_version_label(MIN_SUPPORTED_PYTHON)}",
         "platform": platform.platform(),
         "pid": os.getpid(),
         "cwd": str(Path.cwd()),

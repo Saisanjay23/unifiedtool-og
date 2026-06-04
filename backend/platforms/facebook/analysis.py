@@ -184,7 +184,7 @@ BULK_EXTRACTION_JS = r"""
             } catch(e) {}
         });
 
-        // 3. H1 elements (profile name)
+        // 3. H1 elements (profile name) - clone and remove screen reader/badge artifacts
         const BLOCKLIST = new Set([
             'facebook', 'log in', 'sign up', 'watch', 'meta', 'home',
             'notifications', 'messenger', 'menu', 'search', 'marketplace',
@@ -193,11 +193,26 @@ BULK_EXTRACTION_JS = r"""
         ]);
         const h1s = document.querySelectorAll('h1');
         for (const h1 of h1s) {
-            const text = (h1.textContent || '').trim();
-            if (text && text.length > 1 && text.length < 100 && !BLOCKLIST.has(text.toLowerCase())) {
-                result.h1_text = text;
-                break;
-            }
+            try {
+                const clone = h1.cloneNode(true);
+                // Remove elements that are screen reader only, hidden, or SVGs/icons (like badges)
+                const hiddenEls = clone.querySelectorAll('[class*="hidden"], [class*="sr-only"], [aria-hidden="true"], svg, [role="img"]');
+                hiddenEls.forEach(el => el.remove());
+                
+                // Remove child elements whose text is a verification badge label
+                const BADGE_TEXTS = new Set(['verified account', 'verified', 'verified badge', 'verified profile', 'verified page']);
+                const allChildren = clone.querySelectorAll('*');
+                allChildren.forEach(el => {
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    if (BADGE_TEXTS.has(t)) el.remove();
+                });
+                
+                const text = (clone.textContent || '').trim();
+                if (text && text.length > 1 && text.length < 100 && !BLOCKLIST.has(text.toLowerCase())) {
+                    result.h1_text = text;
+                    break;
+                }
+            } catch(e) {}
         }
 
         // 4-5: Scan page source for structured data (increased to 1.5MB to catch JSON-LD at bottom)
@@ -250,6 +265,44 @@ BULK_EXTRACTION_JS = r"""
                     result.svg_images.push(src.replace(/&amp;/g, '&'));
                 }
             } catch(e) {}
+        }
+
+        // 6c. Semantic profile image locator (search by alt/aria-label/class attributes)
+        const semanticImgs = document.querySelectorAll('img, image, svg image');
+        for (const img of Array.from(semanticImgs)) {
+            const src = img.getAttribute('xlink:href') || img.getAttribute('href') || img.getAttribute('src') || '';
+            if (!src || !src.includes('scontent') || !src.includes('http')) continue;
+            
+            const alt = (img.getAttribute('alt') || '').toLowerCase();
+            const ariaLabel = (img.getAttribute('aria-label') || '').toLowerCase();
+            const title = (img.getAttribute('title') || '').toLowerCase();
+            
+            const isProfilePicText = 
+                alt.includes('profile picture') || alt.includes('profile photo') || alt.includes('photo of') || alt.includes('avatar') ||
+                ariaLabel.includes('profile picture') || ariaLabel.includes('profile photo') || ariaLabel.includes('photo of') ||
+                title.includes('profile picture') || title.includes('profile photo');
+                
+            if (isProfilePicText) {
+                result.svg_images.push(src.replace(/&amp;/g, '&'));
+            } else {
+                // Check parent hierarchy for profile picture text labels
+                let parent = img.parentElement;
+                let isParentProfilePic = false;
+                for (let i = 0; i < 3; i++) {
+                    if (!parent) break;
+                    const pLabel = (parent.getAttribute('aria-label') || '').toLowerCase();
+                    const pTitle = (parent.getAttribute('title') || '').toLowerCase();
+                    if (pLabel.includes('profile picture') || pLabel.includes('profile photo') || pLabel.includes('photo of') ||
+                        pTitle.includes('profile picture') || pTitle.includes('profile photo')) {
+                        isParentProfilePic = true;
+                        break;
+                    }
+                    parent = parent.parentElement;
+                }
+                if (isParentProfilePic) {
+                    result.svg_images.push(src.replace(/&amp;/g, '&'));
+                }
+            }
         }
 
         // 7. Extract unix timestamps from source (separated by type)
@@ -314,15 +367,25 @@ BULK_EXTRACTION_JS = r"""
 """
 
 
-async def _download_profile_image_fast(image_url: str) -> tuple[str | None, int]:
-    """Download profile image. Returns (b64_data, content_length)."""
+async def _download_profile_image_fast(page, image_url: str) -> tuple[str | None, int]:
+    """Download profile image using Playwright's APIRequestContext."""
     if not image_url or "http" not in image_url:
         return None, 0
     if image_url.startswith("data:") or len(image_url) < 10:
         return None, 0
 
-    import requests as req_lib
+    # Primary: Use Playwright's APIRequestContext (inherits cookies, headers, session)
+    try:
+        resp = await page.request.get(image_url, timeout=8000)
+        if resp.ok:
+            body = await resp.body()
+            if len(body) > 500:
+                return base64.b64encode(body).decode("utf-8"), len(body)
+    except Exception as e:
+        logger.debug(f"Playwright image download failed: {e}")
 
+    # Fallback: Use standard requests library
+    import requests as req_lib
     try:
         img_resp = await asyncio.to_thread(
             lambda: req_lib.get(
@@ -332,9 +395,6 @@ async def _download_profile_image_fast(image_url: str) -> tuple[str | None, int]
                     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9",
                     "Referer": "https://www.facebook.com/",
-                    "Sec-Fetch-Dest": "image",
-                    "Sec-Fetch-Mode": "no-cors",
-                    "Sec-Fetch-Site": "cross-site",
                 },
                 timeout=6,
             )
@@ -342,24 +402,54 @@ async def _download_profile_image_fast(image_url: str) -> tuple[str | None, int]
         if img_resp.status_code == 200 and len(img_resp.content) > 500:
             return base64.b64encode(img_resp.content).decode("utf-8"), len(img_resp.content)
     except Exception as e:
-        logger.debug(f"Image download failed: {e}")
+        logger.debug(f"Fallback image download failed: {e}")
 
     return None, 0
 
 
-async def _check_is_silhouette_via_graph(username: str) -> bool | None:
+def _clean_profile_name(name: str) -> str:
+    """Remove Facebook title/screen-reader artifacts to get the clean real name."""
+    if not name:
+        return name
+    cleaned = name
+
+    # Strip pipe-separated suffixes first (e.g. "Name | Facebook")
+    pipe_suffixes = [
+        r"\s*[\|\-–—]\s*(?:Home\s*\|\s*)?Facebook",
+        r"\s*[\|\-–—]\s*Verified\s+Account",
+        r"\s*[\|\-–—]\s*Profile",
+    ]
+    for pat in pipe_suffixes:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
+
+    # Strip trailing verification labels (no separator — directly after the name)
+    # Handles: "Allu Arjun Verified account", "BrandName Verified", etc.
+    cleaned = re.sub(
+        r"\s+Verified\s*(?:account|badge|profile|page)?\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Clean up any double spaces/formatting
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+
+async def _check_graph_api_picture(username: str) -> dict:
     """
-    Use Facebook Graph API to check if a profile uses a default silhouette/avatar.
-    Returns True if silhouette (default), False if real picture, None if API fails.
-    URL: https://graph.facebook.com/{username}/picture?redirect=false
+    Use Facebook Graph API to check if a profile uses a default silhouette/avatar
+    AND retrieve the actual profile picture URL.
+    Returns: {"is_silhouette": bool|None, "url": str|None}
     """
+    result = {"is_silhouette": None, "url": None}
     if not username:
-        return None
+        return result
 
     import requests as req_lib
 
     try:
-        api_url = f"https://graph.facebook.com/{username}/picture?redirect=false"
+        api_url = f"https://graph.facebook.com/{username}/picture?redirect=false&width=720&height=720"
         resp = await asyncio.to_thread(
             lambda: req_lib.get(
                 api_url,
@@ -371,14 +461,19 @@ async def _check_is_silhouette_via_graph(username: str) -> bool | None:
         )
         if resp.status_code == 200:
             data = resp.json()
-            if "data" in data and "is_silhouette" in data["data"]:
-                is_sil = data["data"]["is_silhouette"]
-                logger.info(f"Graph API is_silhouette={is_sil} for {username}")
-                return is_sil
+            if "data" in data:
+                if "is_silhouette" in data["data"]:
+                    result["is_silhouette"] = data["data"]["is_silhouette"]
+                if "url" in data["data"]:
+                    result["url"] = data["data"]["url"]
+                logger.info(
+                    f"Graph API for {username}: is_silhouette={result['is_silhouette']}, "
+                    f"url={'Yes' if result['url'] else 'No'}"
+                )
     except Exception as e:
-        logger.debug(f"Graph API silhouette check failed for {username}: {e}")
+        logger.debug(f"Graph API picture check failed for {username}: {e}")
 
-    return None
+    return result
 
 
 def _is_default_facebook_avatar(image_url: str) -> bool:
@@ -599,7 +694,15 @@ class FacebookAnalyzer(AbstractAnalyzer):
         logger.info(f"Analyzing: {url}")
 
         # ── Network interception (passive, zero overhead) ──────────────
-        captured_network = {"followers": 0, "page_created": None, "joined": None, "joined_text": None, "profile_id": None}
+        captured_network = {
+            "followers": 0,
+            "page_created": None,
+            "joined": None,
+            "joined_text": None,
+            "profile_id": None,
+            "profile_pic_url": None,
+            "display_name": None,
+        }
 
         async def _intercept_response(response):
             try:
@@ -617,6 +720,39 @@ class FacebookAnalyzer(AbstractAnalyzer):
                         captured_network["followers"] = max(
                             captured_network["followers"], int(f_match2.group(1))
                         )
+
+                    # Profile picture URL from GraphQL response
+                    if not captured_network["profile_pic_url"]:
+                        for pic_pat in [
+                            r'"profilePicLarge":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                            r'"profilePicMedium":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                            r'"profilePic":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                            r'"profile_picture":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                            r'"profile_pic_large":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                            r'"profilePhoto":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                            r'"profile_photo":\s*\{[^}]*"uri":\s*"([^"]+)"',
+                        ]:
+                            pic_match = re.search(pic_pat, text)
+                            if pic_match:
+                                pic_url = pic_match.group(1).replace("\\/", "/")
+                                if "scontent" in pic_url and "http" in pic_url:
+                                    captured_network["profile_pic_url"] = pic_url
+                                    break
+
+                    # Display name from GraphQL response
+                    if not captured_network["display_name"]:
+                        for name_pat in [
+                            r'"name":\s*"([^"]{2,80})"',
+                        ]:
+                            name_match = re.search(name_pat, text)
+                            if name_match:
+                                candidate = name_match.group(1)
+                                # Reject generic/system names
+                                if candidate.lower() not in {
+                                    "facebook", "meta", "user", "page",
+                                    "profile", "null", "undefined",
+                                } and not candidate.startswith("{"):
+                                    captured_network["display_name"] = candidate
 
                     # Joined/Created text strings
                     text_matches = re.finditer(r'"text":\s*"([^"]*(?:Joined|Page created|Created)[^"]*(?:20\d{2}|\d+\s+years?\s+ago)[^"]*)"', text, re.IGNORECASE)
@@ -700,11 +836,12 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
             body_text_head = bulk_data.get("body_text_head", "")
 
-            # ── 3. PROFILE NAME ──────────────────────────────────────
+            # ── 3. PROFILE NAME (multi-source resolution) ────────────
             profile_name = None
             og_title = bulk_data.get("og_title", "")
             json_ld_name = bulk_data.get("json_ld_name", "")
             h1_text = bulk_data.get("h1_text", "")
+            network_name = captured_network.get("display_name") or ""
 
             GENERIC_NAMES = {
                 "facebook", "log in", "sign up", "watch", "meta", "home",
@@ -713,10 +850,12 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 "friends", "profile", "settings", "help", "privacy",
             }
 
-            for candidate in [og_title, json_ld_name, h1_text]:
+            # Priority order: h1 (cleaned DOM) → network intercept → JSON-LD → og:title
+            for candidate in [h1_text, network_name, json_ld_name, og_title]:
                 if candidate and 1 < len(candidate) < 100:
-                    if candidate.strip().lower() not in GENERIC_NAMES:
-                        profile_name = candidate.strip()
+                    cleaned_candidate = _clean_profile_name(candidate)
+                    if cleaned_candidate and cleaned_candidate.strip().lower() not in GENERIC_NAMES:
+                        profile_name = cleaned_candidate.strip()
                         break
 
             # URL fallback
@@ -729,7 +868,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                         clean_name = path.split("/")[0].replace(".", " ").replace("-", " ").title()
                         if len(clean_name) > 1:
                             profile_name = f"[URL] {clean_name}"
-                except:
+                except Exception:
                     pass
 
             has_name = bool(profile_name)
@@ -771,46 +910,54 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 if loc_match:
                     location = loc_match.group(2).strip()
 
-            # ── 6. PROFILE PICTURE URL ───────────────────────────────
+            # ── 6. PROFILE PICTURE URL (multi-source resolution) ─────
             profile_picture_url = ""
             has_logo = False
 
             svg_images = bulk_data.get("svg_images", [])
             og_image = bulk_data.get("og_image", "")
             json_ld_image = bulk_data.get("json_ld_image", "")
+            network_pic = captured_network.get("profile_pic_url") or ""
 
-            # Collect the best candidate URL (SVG first, then og:image fallback)
+            # Source 1: DOM-extracted SVG/img elements (most accurate when found)
             for candidate_url in svg_images:
                 if _is_valid_pfp(candidate_url):
                     profile_picture_url = _upgrade_image_url(candidate_url)
                     break
 
+            # Source 2: Network-intercepted GraphQL profile picture URL
+            if not profile_picture_url and network_pic and _is_valid_pfp(network_pic):
+                profile_picture_url = _upgrade_image_url(network_pic)
+                logger.info(f"Using network-intercepted PFP URL for {url}")
+
+            # Source 3: OpenGraph / JSON-LD meta tags
             if not profile_picture_url:
                 for fallback_url in [og_image, json_ld_image]:
                     if fallback_url and "http" in fallback_url:
                         profile_picture_url = _upgrade_image_url(fallback_url)
                         break
 
-            # Diagnostic: log the DOM-extracted URL and its CDN type code
+            # Diagnostic log
             if profile_picture_url:
                 cdn_type = "t39.30808 (user-uploaded)" if "t39.30808" in profile_picture_url else "other (system/generated)"
-                logger.info(f"DOM-extracted PFP URL [{cdn_type}]: {profile_picture_url[:120]} for {url}")
+                logger.info(f"PFP URL [{cdn_type}]: {profile_picture_url[:120]} for {url}")
             else:
-                logger.info(f"DOM-extracted PFP URL: NONE for {url}")
+                logger.info(f"PFP URL: NONE from DOM/network for {url}")
 
             # ── 7. SCREENSHOT (must complete before navigating away) ──
             screenshot_bytes = await self._take_screenshot(page)
 
-            # Download profile image + check Graph API concurrently
-            image_task = asyncio.create_task(
-                _download_profile_image_fast(profile_picture_url)
-            ) if profile_picture_url else None
-
-            # Use numeric profile ID (from network intercept) for Graph API — vanity URLs don't work
+            # ── 8. GRAPH API + IMAGE DOWNLOAD (parallel) ─────────────
+            # Always launch Graph API check — it's our strongest fallback
             graph_id = captured_network.get("profile_id") or self._extract_username(url) or ""
             graph_task = asyncio.create_task(
-                _check_is_silhouette_via_graph(graph_id)
+                _check_graph_api_picture(graph_id)
             ) if graph_id else None
+
+            # Download profile image from DOM/network URL (if we have one)
+            image_task = asyncio.create_task(
+                _download_profile_image_fast(page, profile_picture_url)
+            ) if profile_picture_url else None
 
             # ── 8. FULL PAGE SOURCE for timestamps ───────────────────
             # The JS eval only scans first 300KB but Facebook pages are 2-5MB.
@@ -913,63 +1060,78 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
             created_date = found_date or "Not Available (Restricted)"
 
-            # ── 10. AWAIT IMAGE DOWNLOAD + VALIDATE LOGO ─────────────
+            # ── 10. AWAIT IMAGE DOWNLOAD + GRAPH API ─────────────────
             profile_picture_b64 = None
             img_content_length = 0
 
             if image_task:
-                img_result = await image_task
-                if img_result:
-                    profile_picture_b64, img_content_length = img_result
+                try:
+                    img_result = await image_task
+                    if img_result:
+                        profile_picture_b64, img_content_length = img_result
+                except Exception as e:
+                    logger.debug(f"Image download task failed: {e}")
 
-            # Await Graph API silhouette check
+            # Await Graph API picture check
             is_silhouette = None
+            graph_api_url = None
             if graph_task:
                 try:
-                    is_silhouette = await graph_task
+                    graph_result = await graph_task
+                    is_silhouette = graph_result.get("is_silhouette")
+                    graph_api_url = graph_result.get("url")
                 except Exception:
-                    is_silhouette = None
+                    pass
 
-            # ── LOGO DECISION ─────────────────────────────────────────────
-            # Facebook serves monograms (grey square with an initial) from the same
-            # t39.30808 user-content CDN folder as real profile pictures.
-            # However, monograms are tiny PNGs (typically 1.9KB - 2.5KB).
-            # Real user-uploaded photos (even simple logos) are much larger (>5KB).
-            #
-            # If Graph API says `is_silhouette=True`, it could mean:
-            # 1. It's a real monogram (file size < 3000 bytes)
-            # 2. Graph API is restricting anonymous access to a real photo (file size > 3000 bytes)
+            # ── GRAPH API IMAGE FALLBACK ──────────────────────────────
+            # If we failed to get a profile picture from DOM/network,
+            # use Graph API URL as last resort. Activate if:
+            #   - We have no profile picture URL at all, OR
+            #   - We have a URL but the download failed (no b64 data)
+            if graph_api_url:
+                need_graph_fallback = (
+                    (not profile_picture_url) or
+                    (not profile_picture_b64 and img_content_length == 0)
+                )
+                if need_graph_fallback and is_silhouette is not True:
+                    profile_picture_url = graph_api_url
+                    logger.info(f"Graph API fallback PFP URL: {graph_api_url[:120]} for {url}")
+                    try:
+                        graph_b64, graph_len = await _download_profile_image_fast(page, graph_api_url)
+                        if graph_b64 and graph_len > 500:
+                            profile_picture_b64 = graph_b64
+                            img_content_length = graph_len
+                            logger.info(f"Graph API image downloaded: {graph_len} bytes for {url}")
+                    except Exception as e:
+                        logger.debug(f"Graph API image download failed: {e}")
+
+            # ── LOGO DECISION ─────────────────────────────────────────
             is_default_url = _is_default_facebook_avatar(profile_picture_url)
             is_user_content = bool(profile_picture_url) and "t39.30808" in profile_picture_url
 
             if not profile_picture_url:
                 has_logo = False
-                logger.info(f"Logo=No (no profile image URL extracted; monogram/placeholder) for {url}")
+                logger.info(f"Logo=No (no image URL from any source) for {url}")
             elif is_default_url:
                 has_logo = False
                 logger.info(f"Logo=No (default avatar URL pattern) for {url}")
             elif is_silhouette is False:
-                # Graph API explicitly confirmed it's a real photo
                 has_logo = True
                 logger.info(f"Logo=Yes (Graph API confirmed real photo) for {url}")
-            elif is_user_content and img_content_length > 3000:
-                # User content CDN + large file size = definitively a real photo
-                # (Overrides Graph API `is_silhouette=True` restrictions)
+            elif img_content_length > 3000:
+                # Successfully downloaded a substantial image — it's real
                 has_logo = True
-                logger.info(f"Logo=Yes (user-uploaded photo, {img_content_length} bytes) for {url}")
-            elif is_user_content and img_content_length > 0:
-                # User content CDN + small file size (<3000 bytes) = Monogram
+                logger.info(f"Logo=Yes (image {img_content_length} bytes) for {url}")
+            elif is_user_content and 0 < img_content_length <= 3000:
                 has_logo = False
-                logger.info(f"Logo=No (monogram detected, {img_content_length} bytes) for {url}")
+                logger.info(f"Logo=No (monogram, {img_content_length} bytes) for {url}")
             elif is_silhouette is True:
                 has_logo = False
                 logger.info(f"Logo=No (Graph API confirmed silhouette) for {url}")
-            elif img_content_length > 3000:
+            elif profile_picture_url and _is_valid_pfp(profile_picture_url):
+                # URL looks valid but couldn't download — give benefit of doubt
                 has_logo = True
-                logger.info(f"Logo=Yes (image downloaded, {img_content_length} bytes) for {url}")
-            elif profile_picture_url and _is_valid_pfp(profile_picture_url) and not is_silhouette:
-                has_logo = True
-                logger.info(f"Logo=Yes (valid profile image URL; download unavailable) for {url}")
+                logger.info(f"Logo=Yes (valid URL, download unavailable) for {url}")
             else:
                 has_logo = False
                 logger.info(f"Logo=No (no valid image found) for {url}")
@@ -995,7 +1157,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
         result.has_logo = has_logo
         if profile_picture_url:
             result.profile_image_url = profile_picture_url
-        if profile_picture_b64 and has_logo:
+        # Always store downloaded image data — the UI should show it
+        # regardless of the logo classification decision
+        if profile_picture_b64:
             result.profile_image_b64 = profile_picture_b64
 
         result.created_at = created_date
