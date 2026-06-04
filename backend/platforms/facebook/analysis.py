@@ -88,6 +88,45 @@ def _append_unique_timestamps(target: list[int], values: list[int]) -> None:
             target.append(ts)
 
 
+def _looks_like_post_timestamp_context(source: str, start: int, end: int) -> bool:
+    """Keep timestamps that appear near post/story/video context, not page chrome."""
+    window = source[max(0, start - 700): min(len(source), end + 700)].lower()
+    if not window:
+        return False
+
+    reject_tokens = (
+        "page_created",
+        "page created",
+        "founding_date",
+        "registration_time",
+        "profile_creation_time",
+        "join_time",
+        "join_date",
+        "joined facebook",
+        "about_profile_transparency",
+        "profile transparency",
+    )
+    if any(token in window for token in reject_tokens):
+        return False
+
+    post_tokens = (
+        "creation_time",
+        "publish_time",
+        "created_time",
+        "data-utime",
+        "story",
+        "post_id",
+        "postid",
+        "/posts/",
+        "/videos/",
+        "/photos/",
+        "permalink",
+        "feedback",
+        "comet_feed",
+    )
+    return any(token in window for token in post_tokens)
+
+
 def _extract_post_timestamps_from_source(source: str) -> list[int]:
     """Extract post-related timestamps without mixing in account creation metadata."""
     if not source:
@@ -103,12 +142,16 @@ def _extract_post_timestamps_from_source(source: str) -> list[int]:
         r'\\"creation_time\\"\\?:\s*\{\s*\\"timestamp\\"\\?:\s*(\d{10})',
     ]
     for pat in patterns:
-        for match in re.findall(pat, source):
+        for match in re.finditer(pat, source):
             try:
-                ts = int(match)
+                ts = int(match.group(1))
             except (TypeError, ValueError):
                 continue
-            if ts not in timestamps and _valid_facebook_timestamp(ts):
+            if (
+                ts not in timestamps
+                and _valid_facebook_timestamp(ts)
+                and _looks_like_post_timestamp_context(source, match.start(), match.end())
+            ):
                 timestamps.append(ts)
     return timestamps
 
@@ -133,6 +176,108 @@ def _extract_creation_timestamps_from_source(source: str) -> list[int]:
             if ts not in timestamps and _valid_facebook_timestamp(ts):
                 timestamps.append(ts)
     return timestamps
+
+
+def _clean_location_candidate(raw: str) -> str:
+    """Trim Facebook body text noise from a location candidate."""
+    if not raw:
+        return ""
+
+    candidate = re.sub(r"\s+", " ", raw).strip(" -:|,")
+    stop_patterns = [
+        r"\bWorks at\b",
+        r"\bStudied at\b",
+        r"\bWent to\b",
+        r"\bFollowed by\b",
+        r"\bFollowers?\b",
+        r"\bFriends?\b",
+        r"\bPhotos?\b",
+        r"\bVideos?\b",
+        r"\bPosts?\b",
+        r"\bAbout\b",
+        r"\bIntro\b",
+        r"\bContact\b",
+    ]
+    for pat in stop_patterns:
+        split = re.split(pat, candidate, maxsplit=1, flags=re.IGNORECASE)
+        candidate = split[0].strip(" -:|,")
+
+    if not candidate or len(candidate) > 80:
+        return ""
+    if re.search(r"https?://|facebook|login|sign up", candidate, re.IGNORECASE):
+        return ""
+    return candidate
+
+
+def _extract_location_from_text(text: str) -> str:
+    """Extract a bounded Facebook location from visible profile text."""
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        match = re.search(r"\b(?:Lives in|From)\s+(.+)$", line, re.IGNORECASE)
+        if match:
+            location = _clean_location_candidate(match.group(1))
+            if location:
+                return location
+
+    compact = re.sub(r"\s+", " ", text)
+    match = re.search(
+        r"\b(?:Lives in|From)\s+(.{2,80}?)(?=\s+(?:Works at|Studied at|Went to|Followed by|Followers?|Friends?|Photos?|Videos?|Posts?|About|Intro|Contact)\b|$)",
+        compact,
+        re.IGNORECASE,
+    )
+    if match:
+        return _clean_location_candidate(match.group(1))
+    return ""
+
+
+async def _detect_facebook_page_state(page) -> str | None:
+    """Detect login, checkpoint, unavailable, or restricted Facebook states."""
+    try:
+        current_url = (page.url or "").lower()
+        if any(token in current_url for token in ("/login", "checkpoint", "/recover", "privacy/consent")):
+            return "Restricted: Facebook login/checkpoint page"
+
+        body_text = ""
+        try:
+            body_text = await asyncio.wait_for(
+                page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 4000)"),
+                timeout=2.0,
+            )
+        except Exception:
+            return None
+
+        normalized = re.sub(r"\s+", " ", body_text).strip().lower()
+        if not normalized:
+            return None
+
+        restricted_patterns = [
+            r"you must log in",
+            r"log in to facebook",
+            r"log into facebook",
+            r"session expired",
+            r"confirm your identity",
+            r"security check",
+            r"checkpoint",
+            r"content isn't available",
+            r"this content isn't available",
+            r"this page isn't available",
+            r"this profile isn't available",
+            r"page not found",
+            r"profile unavailable",
+            r"account has been disabled",
+            r"temporarily blocked",
+            r"we limit how often",
+            r"cookies on facebook",
+            r"allow the use of cookies",
+        ]
+        if any(re.search(pattern, normalized) for pattern in restricted_patterns):
+            return "Restricted: Facebook blocked, unavailable, or login-gated page"
+    except Exception:
+        return None
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -243,9 +388,25 @@ BULK_EXTRACTION_JS = r"""
             if (blocklist.some(b => href.includes(b))) continue;
             try {
                 const box = img.getBoundingClientRect();
-                // y > 50 ignores navbar, y < 350 ensures it's in the header,
+                let w = box.width;
+                let y = box.y;
+                if (w === 0) {
+                    const style = img.getAttribute('style') || '';
+                    const wMatch = style.match(/width:\s*(\d+)px/i);
+                    if (wMatch) {
+                        w = parseFloat(wMatch[1]);
+                    } else {
+                        const parentSvg = img.closest('svg');
+                        if (parentSvg) {
+                            const svgStyle = parentSvg.getAttribute('style') || '';
+                            const svgWMatch = svgStyle.match(/width:\s*(\d+)px/i);
+                            if (svgWMatch) w = parseFloat(svgWMatch[1]);
+                        }
+                    }
+                }
+                // y > 50 ignores navbar, y < 550 ensures it's in the header (personal profile photo sits lower),
                 // width between 100 and 220 excludes cover photos and post images
-                if (box.width >= 100 && box.width <= 220 && box.y > 50 && box.y < 350) {
+                if (w >= 100 && w <= 220 && y > 50 && y < 550) {
                     result.svg_images.push(href.replace(/&amp;/g, '&'));
                 }
             } catch(e) {}
@@ -260,8 +421,18 @@ BULK_EXTRACTION_JS = r"""
             if (blocklist.some(b => src.includes(b))) continue;
             try {
                 const box = img.getBoundingClientRect();
+                let w = box.width;
+                let y = box.y;
+                if (w === 0) {
+                    w = parseFloat(img.getAttribute('width') || '0');
+                    if (w === 0) {
+                        const style = img.getAttribute('style') || '';
+                        const wMatch = style.match(/width:\s*(\d+)px/i);
+                        if (wMatch) w = parseFloat(wMatch[1]);
+                    }
+                }
                 // Same constraints to avoid grabbing cover photo/post images
-                if (box.width >= 100 && box.width <= 220 && box.y > 50 && box.y < 350) {
+                if (w >= 100 && w <= 220 && y > 50 && y < 550) {
                     result.svg_images.push(src.replace(/&amp;/g, '&'));
                 }
             } catch(e) {}
@@ -825,6 +996,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
             await _handle_blocking_popups(page)
 
+            # Sleep to allow SPA client-side rendering to complete and image layout to settle
+            await asyncio.sleep(1.2)
+
             # ── 2. BULK EXTRACT (single JS evaluation) ────────────────
             try:
                 bulk_data = await asyncio.wait_for(
@@ -1170,7 +1344,16 @@ class FacebookAnalyzer(AbstractAnalyzer):
         if screenshot_bytes:
             result.screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
-        result.comments = ""
+        if error_comments:
+            formatted_comments = []
+            for comment in error_comments:
+                if comment == "Redirected to Login":
+                    formatted_comments.append("Redirected to Login (Please log in via Session Manager)")
+                else:
+                    formatted_comments.append(comment)
+            result.comments = ", ".join(formatted_comments)
+        else:
+            result.comments = ""
         self._calculate_risk(result)
 
         # Record selector hits/misses to HealthManager
