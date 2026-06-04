@@ -574,17 +574,17 @@ BULK_EXTRACTION_JS = r"""
                 const text = (el.textContent || '').trim();
                 if (!text || text.length > 50) continue;
                 
-                const matchFollowers = text.match(/([\d,.]+K?M?)\s+followers/i);
+                const matchFollowers = text.match(/([\d,.]+K?M?)\s+followers?/i);
                 if (matchFollowers) {
                     const val = parseMetricText(matchFollowers[1]);
                     if (val > result.dom_followers) result.dom_followers = val;
                 }
-                const matchLikes = text.match(/([\d,.]+K?M?)\s+likes/i);
+                const matchLikes = text.match(/([\d,.]+K?M?)\s+likes?/i);
                 if (matchLikes) {
                     const val = parseMetricText(matchLikes[1]);
                     if (val > result.dom_likes) result.dom_likes = val;
                 }
-                const matchFriends = text.match(/([\d,.]+K?M?)\s+friends/i);
+                const matchFriends = text.match(/([\d,.]+K?M?)\s+friends?/i);
                 if (matchFriends) {
                     const val = parseMetricText(matchFriends[1]);
                     if (val > result.dom_friends) result.dom_friends = val;
@@ -1148,14 +1148,14 @@ class FacebookAnalyzer(AbstractAnalyzer):
             # Parse true follower metrics from body text.
             followers_from_text = 0
             if body_text_head:
-                f_m = re.search(r"([\d,.]+K?M?)\s+followers", body_text_head, re.IGNORECASE)
+                f_m = re.search(r"([\d,.]+K?M?)\s+followers?", body_text_head, re.IGNORECASE)
                 if f_m:
                     followers_from_text = parse_followers(f_m.group(1))
 
             # Parse friends metrics from body text.
             friends_from_text = 0
             if body_text_head:
-                fr_m = re.search(r"([\d,.]+K?M?)\s+friends", body_text_head, re.IGNORECASE)
+                fr_m = re.search(r"([\d,.]+K?M?)\s+friends?", body_text_head, re.IGNORECASE)
                 if fr_m:
                     friends_from_text = parse_followers(fr_m.group(1))
 
