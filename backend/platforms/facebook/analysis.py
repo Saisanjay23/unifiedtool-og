@@ -1313,6 +1313,49 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 all_unix_timestamps, iso_dates, text_dates, captured_network, creation_timestamps
             )
 
+            # Conditional Retry: If creation date is not found immediately, it might be due to
+            # stream-rendering or layout hydration. Wait briefly and recheck the page content and inner text.
+            if not page_state_issue and not found_date:
+                logger.info(f"Creation date not found immediately for {url}. Waiting 1.0s to allow page hydration...")
+                await asyncio.sleep(1.0)
+                try:
+                    # Refetch full page source and check for lazy-loaded creation timestamps
+                    page_source = await asyncio.wait_for(page.content(), timeout=3.0)
+                    if page_source:
+                        _append_unique_timestamps(
+                            creation_timestamps,
+                            _extract_creation_timestamps_from_source(page_source),
+                        )
+                        _append_unique_timestamps(
+                            all_unix_timestamps,
+                            _extract_post_timestamps_from_source(page_source),
+                        )
+
+                    # Refetch inner text and search for text-based dates
+                    inner_text = await asyncio.wait_for(page.evaluate("() => document.body.innerText"), timeout=2.0)
+                    if inner_text:
+                        for pat in [
+                            r"Page created[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+                            r"Joined Facebook[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+                            r"Joined[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+                            r"Founded[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+                            r"Created[:\s\-–—]*(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+                            r"Page created\s+(\d+\s+years?\s+ago)",
+                            r"Joined\s+(\d+\s+years?\s+ago)",
+                            r"(?:Joined|Created|Founded)[^\w\n]?\s*(?:in|on)?\s*([A-Za-z]+\s+\d{4}|\d{4})",
+                        ]:
+                            m = re.search(pat, inner_text, re.IGNORECASE)
+                            if m and m.group(1).strip() not in text_dates:
+                                text_dates.append(m.group(1).strip())
+                                logger.info(f"Found creation date text on retry: '{m.group(1).strip()}'")
+
+                    # Re-extract
+                    found_date, last_post_date, is_active = _extract_timestamps_unified(
+                        all_unix_timestamps, iso_dates, text_dates, captured_network, creation_timestamps
+                    )
+                except Exception as retry_err:
+                    logger.debug(f"Hydration retry attempt failed: {retry_err}")
+
             if not page_state_issue and not last_post_date:
                 try:
                     fallback_last_post = await asyncio.wait_for(
