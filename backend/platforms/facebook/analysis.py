@@ -974,12 +974,20 @@ class FacebookAnalyzer(AbstractAnalyzer):
         created_date = "No"
         last_post_date = ""
         is_active = False
+        page_state_issue = None
 
         try:
             # ── 1. NAVIGATE (single page load) ───────────────────────
             try:
+                target_url = url
+                if "locale=" not in target_url:
+                    if "?" in target_url:
+                        target_url = f"{target_url}&locale=en_US"
+                    else:
+                        target_url = f"{target_url}?locale=en_US"
+
                 await page.goto(
-                    url,
+                    target_url,
                     wait_until="domcontentloaded",
                     timeout=settings.ANALYSIS_PAGE_TIMEOUT_MS,
                 )
@@ -989,7 +997,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 try:
                     await page.wait_for_selector("h1", timeout=2000)
                 except:
-                    if "login" in page.url:
+                    if "login" in page.url or "checkpoint" in page.url:
                         error_comments.append("Redirected to Login")
             except Exception:
                 error_comments.append("Page Load Timeout")
@@ -998,6 +1006,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
             # Sleep to allow SPA client-side rendering to complete and image layout to settle
             await asyncio.sleep(1.2)
+            page_state_issue = await _detect_facebook_page_state(page)
+            if page_state_issue and page_state_issue not in error_comments:
+                error_comments.append(page_state_issue)
 
             # ── 2. BULK EXTRACT (single JS evaluation) ────────────────
             try:
@@ -1038,7 +1049,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     from urllib.parse import urlparse
                     parsed = urlparse(url)
                     path = parsed.path.strip("/")
-                    if path and path not in ["profile.php", "pages", "groups"]:
+                    if not page_state_issue and path and path not in ["profile.php", "pages", "groups"]:
                         clean_name = path.split("/")[0].replace(".", " ").replace("-", " ").title()
                         if len(clean_name) > 1:
                             profile_name = f"[URL] {clean_name}"
@@ -1080,9 +1091,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
             location = bulk_data.get("json_ld_location", "")
 
             if not location and body_text_head:
-                loc_match = re.search(r"(Lives in|From)\s+([^\n]+)", body_text_head)
-                if loc_match:
-                    location = loc_match.group(2).strip()
+                location = _extract_location_from_text(body_text_head)
 
             # ── 6. PROFILE PICTURE URL (multi-source resolution) ─────
             profile_picture_url = ""
@@ -1107,7 +1116,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
             # Source 3: OpenGraph / JSON-LD meta tags
             if not profile_picture_url:
                 for fallback_url in [og_image, json_ld_image]:
-                    if fallback_url and "http" in fallback_url:
+                    if not page_state_issue and fallback_url and "http" in fallback_url:
                         profile_picture_url = _upgrade_image_url(fallback_url)
                         break
 
@@ -1154,6 +1163,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     creation_timestamps,
                     _extract_creation_timestamps_from_source(page_source),
                 )
+            if page_state_issue:
+                all_unix_timestamps = []
+                creation_timestamps = []
 
             iso_dates = bulk_data.get("iso_dates", [])
             text_dates = bulk_data.get("text_dates", [])
@@ -1182,12 +1194,16 @@ class FacebookAnalyzer(AbstractAnalyzer):
             except Exception as e:
                 logger.debug(f"Failed to scan innerText for dates: {e}")
 
+            if page_state_issue:
+                iso_dates = []
+                text_dates = []
+
             # Single-pass: get both creation date AND last post date
             found_date, last_post_date, is_active = _extract_timestamps_unified(
                 all_unix_timestamps, iso_dates, text_dates, captured_network, creation_timestamps
             )
 
-            if not last_post_date:
+            if not page_state_issue and not last_post_date:
                 try:
                     fallback_last_post = await asyncio.wait_for(
                         self._try_profile_feed_last_post_date(page), timeout=5.0
@@ -1203,7 +1219,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     logger.debug(f"Profile feed fallback timed out for {url}")
 
             # ── 8.6. TRY TRANSPARENCY MODAL FIRST (Zero-navigation path) ──
-            if not found_date:
+            if not page_state_issue and not found_date:
                 try:
                     found_modal_date = await asyncio.wait_for(
                         self._try_name_header_click(page), timeout=5.0
@@ -1213,7 +1229,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 except Exception as e:
                     logger.debug(f"Name header click extraction failed: {e}")
 
-            if not found_date:
+            if not page_state_issue and not found_date:
                 try:
                     found_modal_date = await asyncio.wait_for(
                         self._try_transparency_modal(page), timeout=5.0
@@ -1224,7 +1240,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     logger.debug(f"Transparency modal extraction failed: {e}")
 
             # ── 9. DEEP DATE STRATEGY: About page (only if not found yet) ──
-            if not found_date:
+            if not page_state_issue and not found_date:
                 try:
                     found_date = await asyncio.wait_for(
                         self._try_about_page(page, url), timeout=8.0
@@ -1262,7 +1278,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
             # use Graph API URL as last resort. Activate if:
             #   - We have no profile picture URL at all, OR
             #   - We have a URL but the download failed (no b64 data)
-            if graph_api_url:
+            if graph_api_url and not page_state_issue:
                 need_graph_fallback = (
                     (not profile_picture_url) or
                     (not profile_picture_b64 and img_content_length == 0)
@@ -1639,9 +1655,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
                     m = re.search(r"id=(\d+)", base_url)
                     if m:
                         uid = m.group(1)
-                        return f"https://www.facebook.com/profile.php?id={uid}&sk={tab}"
+                        return f"https://www.facebook.com/profile.php?id={uid}&sk={tab}&locale=en_US"
                 clean_url = base_url.split("?")[0].rstrip("/")
-                return f"{clean_url}/{tab}"
+                return f"{clean_url}/{tab}?locale=en_US"
 
             # 1. Try appending /about_profile_transparency directly as it is clean and precise
             about_transparency_url = build_sub_url(url, "about_profile_transparency")
