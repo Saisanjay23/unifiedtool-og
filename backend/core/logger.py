@@ -35,6 +35,48 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
+class WindowsSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """
+    Subclass of RotatingFileHandler that handles PermissionError on Windows.
+    This prevents tracebacks and logging crashes when the file is locked by
+    other processes (e.g. background server / local script runs).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rollover_failed = False
+        self._next_attempt_size = 0
+
+    def shouldRollover(self, record):
+        if self._rollover_failed:
+            try:
+                self.stream.seek(0, 2)
+                if self.stream.tell() < self._next_attempt_size:
+                    return 0
+            except Exception:
+                pass
+        return super().shouldRollover(record)
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+            self._rollover_failed = False
+        except PermissionError:
+            self._rollover_failed = True
+            # Reopen the stream if it was closed by doRollover before raising
+            if self.stream is None:
+                try:
+                    self.stream = self._open()
+                except Exception:
+                    pass
+            try:
+                if self.stream:
+                    self.stream.seek(0, 2)
+                    self._next_attempt_size = self.stream.tell() + 1024 * 1024
+            except Exception:
+                self._next_attempt_size = 0
+
+
 def _setup_root_logger():
     """
     Configure the root logger once at import time.
@@ -61,7 +103,7 @@ def _setup_root_logger():
 
     # ---- File handler (structured JSON for tooling) ----
     log_file = os.path.join(settings.LOG_PATH, "unified_tool.jsonl")
-    file_handler = logging.handlers.RotatingFileHandler(
+    file_handler = WindowsSafeRotatingFileHandler(
         log_file,
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
