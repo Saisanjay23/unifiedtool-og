@@ -18,6 +18,11 @@ from backend.core.logger import get_logger
 logger = get_logger("health")
 
 
+class HealthDegradedError(Exception):
+    """Raised when platform health degrades below the safety threshold."""
+    pass
+
+
 @dataclass
 class PlatformHealth:
     """Tracks the health state for a single platform."""
@@ -37,9 +42,17 @@ class PlatformHealth:
     cooldown_until: float = 0.0
     selector_hits: int = 0
     selector_misses: int = 0
+    selector_stats: dict = None
+
+    def __post_init__(self):
+        if self.selector_stats is None:
+            self.selector_stats = {}
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if not d.get("selector_stats"):
+            d["selector_stats"] = {}
+        return d
 
 
 class HealthManager:
@@ -127,11 +140,33 @@ class HealthManager:
         """Track whether a CSS selector found content on the page."""
         async with self._lock:
             health = self._get_platform(platform)
+            if health.selector_stats is None:
+                health.selector_stats = {}
+            if selector not in health.selector_stats:
+                health.selector_stats[selector] = {"hits": 0, "misses": 0, "consecutive_misses": 0}
+
             if success:
                 health.selector_hits += 1
+                health.selector_stats[selector]["hits"] += 1
+                health.selector_stats[selector]["consecutive_misses"] = 0
             else:
                 health.selector_misses += 1
+                health.selector_stats[selector]["misses"] += 1
+                health.selector_stats[selector]["consecutive_misses"] += 1
+
             self._recalculate_score(health)
+            self._check_selector_health_alert(health, selector)
+
+    def _check_selector_health_alert(self, health: PlatformHealth, selector: str):
+        """Log critical alerts if a specific selector fails repeatedly."""
+        stats = health.selector_stats.get(selector, {})
+        consecutive_misses = stats.get("consecutive_misses", 0)
+        if consecutive_misses >= 3:
+            logger.error(
+                f"CRITICAL_SELECTOR_ALERT: Platform '{health.platform}' selector '{selector}' "
+                f"has failed {consecutive_misses} times consecutively! "
+                f"Possible DOM layout change or login wall. Health Score: {health.health_score:.2f}"
+            )
 
     def _recalculate_score(self, health: PlatformHealth):
         """
@@ -164,12 +199,12 @@ class HealthManager:
             if utilization > 0.8:
                 score -= (utilization - 0.8) * 1.0  # up to -0.2 at 100%
 
-        # selector reliability
-        total_selectors = health.selector_hits + health.selector_misses
-        if total_selectors > 10:
-            selector_rate = health.selector_misses / total_selectors
-            if selector_rate > 0.3:
-                score -= 0.1
+        # consecutive selector misses penalty for critical selectors
+        if health.selector_stats:
+            for sel, stats in health.selector_stats.items():
+                consecutive = stats.get("consecutive_misses", 0)
+                if sel in ("display_name", "followers") and consecutive >= 3:
+                    score -= 0.15 * min(3, consecutive - 2)
 
         health.health_score = max(0.0, min(1.0, score))
 

@@ -110,10 +110,6 @@ def _looks_like_post_timestamp_context(source: str, start: int, end: int) -> boo
         return False
 
     post_tokens = (
-        "creation_time",
-        "publish_time",
-        "created_time",
-        "data-utime",
         "story",
         "post_id",
         "postid",
@@ -288,6 +284,21 @@ async def _detect_facebook_page_state(page) -> str | None:
 
 BULK_EXTRACTION_JS = r"""
 () => {
+    const parseMetricText = (str) => {
+        if (!str) return 0;
+        let clean = str.replace(/,/g, '').trim().toLowerCase();
+        let multiplier = 1;
+        if (clean.endsWith('k')) {
+            multiplier = 1000;
+            clean = clean.slice(0, -1);
+        } else if (clean.endsWith('m')) {
+            multiplier = 1000000;
+            clean = clean.slice(0, -1);
+        }
+        const val = parseFloat(clean);
+        return isNaN(val) ? 0 : Math.round(val * multiplier);
+    };
+
     const result = {
         og_title: '',
         json_ld_name: '',
@@ -295,6 +306,12 @@ BULK_EXTRACTION_JS = r"""
         interaction_counts: [],
         title_numbers: [],
         json_ld_location: '',
+        dom_location_link: '',
+        json_ld_followers: 0,
+        json_ld_likes: 0,
+        dom_followers: 0,
+        dom_likes: 0,
+        dom_friends: 0,
         og_image: '',
         svg_images: [],
         json_ld_image: '',
@@ -326,8 +343,32 @@ BULK_EXTRACTION_JS = r"""
                     const img = typeof data.image === 'object' ? (data.image.contentUrl || data.image.url) : data.image;
                     if (img) result.json_ld_image = img;
                 }
+                if (data.interactionStatistic) {
+                    const stats = Array.isArray(data.interactionStatistic) ? data.interactionStatistic : [data.interactionStatistic];
+                    stats.forEach(stat => {
+                        const type = stat.interactionType || '';
+                        const count = parseInt(stat.userInteractionCount || '0');
+                        if (type.includes('LikeAction')) {
+                            result.json_ld_likes = count;
+                        } else if (type.includes('FollowAction')) {
+                            result.json_ld_followers = count;
+                        }
+                    });
+                }
             } catch(e) {}
         });
+
+        // 2b. DOM Location from map links (e.g. details sidebar)
+        let mapsLocation = '';
+        const mapLinks = document.querySelectorAll('a[href*="maps"], a[href*="bing.com/maps"], a[href*="google.com/maps"]');
+        for (const link of mapLinks) {
+            const text = (link.textContent || '').trim();
+            if (text && text.length > 2 && text.length < 100 && !text.includes('http') && !text.toLowerCase().includes('map')) {
+                mapsLocation = text;
+                break;
+            }
+        }
+        result.dom_location_link = mapsLocation;
 
         // 3. H1 elements (profile name) - clone and remove screen reader/badge artifacts
         const BLOCKLIST = new Set([
@@ -525,6 +566,31 @@ BULK_EXTRACTION_JS = r"""
         while ((tdMatch = textDateRegex.exec(srcText)) !== null) {
             result.text_dates.push(tdMatch[1]);
         }
+
+        // 9b. DOM metrics elements scanning
+        try {
+            const allElements = document.querySelectorAll('a, span, div');
+            for (const el of allElements) {
+                const text = (el.textContent || '').trim();
+                if (!text || text.length > 50) continue;
+                
+                const matchFollowers = text.match(/([\d,.]+K?M?)\s+followers/i);
+                if (matchFollowers) {
+                    const val = parseMetricText(matchFollowers[1]);
+                    if (val > result.dom_followers) result.dom_followers = val;
+                }
+                const matchLikes = text.match(/([\d,.]+K?M?)\s+likes/i);
+                if (matchLikes) {
+                    const val = parseMetricText(matchLikes[1]);
+                    if (val > result.dom_likes) result.dom_likes = val;
+                }
+                const matchFriends = text.match(/([\d,.]+K?M?)\s+friends/i);
+                if (matchFriends) {
+                    const val = parseMetricText(matchFriends[1]);
+                    if (val > result.dom_friends) result.dom_friends = val;
+                }
+            }
+        } catch(e) {}
 
         // 10. Body text head (for text-based follower/location extraction)
         try {
@@ -864,9 +930,19 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
         logger.info(f"Analyzing: {url}")
 
+        # ── Pre-Scrape Health Check ────────────────────────────────────
+        from backend.core.health import HealthDegradedError
+        if self.health.get_health_status("facebook") in ("critical", "suspended"):
+            raise HealthDegradedError(
+                "Facebook extraction quality has degraded below safety threshold or the session is suspended. "
+                "Aborted to prevent returning partial or inaccurate results."
+            )
+
         # ── Network interception (passive, zero overhead) ──────────────
         captured_network = {
             "followers": 0,
+            "likes": 0,
+            "friends": 0,
             "page_created": None,
             "joined": None,
             "joined_text": None,
@@ -880,7 +956,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 if "graphql" in response.url and response.status == 200:
                     text = await response.text()
 
-                    # Followers
+                    # Followers / Friends / Likes
                     f_match = re.search(r'"follower_count":\s*(\d+)', text)
                     if f_match:
                         captured_network["followers"] = max(
@@ -888,8 +964,13 @@ class FacebookAnalyzer(AbstractAnalyzer):
                         )
                     f_match2 = re.search(r'"friend_count":\s*(\d+)', text)
                     if f_match2:
-                        captured_network["followers"] = max(
-                            captured_network["followers"], int(f_match2.group(1))
+                        captured_network["friends"] = max(
+                            captured_network["friends"], int(f_match2.group(1))
+                        )
+                    f_match3 = re.search(r'"like_count":\s*(\d+)', text)
+                    if f_match3:
+                        captured_network["likes"] = max(
+                            captured_network["likes"], int(f_match3.group(1))
                         )
 
                     # Profile picture URL from GraphQL response
@@ -959,8 +1040,8 @@ class FacebookAnalyzer(AbstractAnalyzer):
                             if id_match:
                                 captured_network["profile_id"] = id_match.group(1)
                                 break
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Response interception failed: {e}")
 
         page.on("response", _intercept_response)
 
@@ -996,7 +1077,8 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
                 try:
                     await page.wait_for_selector("h1", timeout=2000)
-                except:
+                except Exception as e:
+                    logger.debug(f"h1 selector wait timed out: {e}")
                     if "login" in page.url or "checkpoint" in page.url:
                         error_comments.append("Redirected to Login")
             except Exception:
@@ -1063,35 +1145,39 @@ class FacebookAnalyzer(AbstractAnalyzer):
             # ── 4. FOLLOWERS ─────────────────────────────────────────
             followers = 0
 
-            interaction_counts = bulk_data.get("interaction_counts", [])
-            if interaction_counts:
-                followers = max(interaction_counts)
+            # Parse true follower metrics from body text.
+            followers_from_text = 0
 
-            if followers == 0:
-                title_numbers = bulk_data.get("title_numbers", [])
-                if title_numbers:
-                    followers = max(title_numbers)
+            if body_text_head:
+                f_m = re.search(r"([\d,.]+K?M?)\s+followers", body_text_head, re.IGNORECASE)
+                if f_m:
+                    followers_from_text = parse_followers(f_m.group(1))
 
-            if followers == 0 and body_text_head:
-                for pattern in [
-                    r"([\d,.]+K?M?)\s+followers",
-                    r"([\d,.]+K?M?)\s+likes",
-                    r"([\d,.]+K?M?)\s+friends",
-                ]:
-                    m = re.search(pattern, body_text_head, re.IGNORECASE)
-                    if m:
-                        followers = parse_followers(m.group(1))
-                        if followers > 0:
-                            break
+            # Compile true follower candidates only.
+            json_ld_followers = bulk_data.get("json_ld_followers", 0)
+            net_followers = captured_network.get("followers", 0)
+            dom_followers = bulk_data.get("dom_followers", 0)
+            resolved_followers = json_ld_followers or net_followers or followers_from_text or dom_followers
 
-            if followers == 0 and captured_network["followers"] > 0:
-                followers = captured_network["followers"]
+            # Keep the canonical followers field semantically strict. Likes,
+            # friends, generic InteractionCount, and title-only numbers are
+            # intentionally not mapped into followers because they can inflate
+            # risk scoring and exports with the wrong metric.
+            followers = resolved_followers
+
+            if page_state_issue:
+                followers = 0
 
             # ── 5. LOCATION ──────────────────────────────────────────
             location = bulk_data.get("json_ld_location", "")
 
+            if not location:
+                location = _clean_location_candidate(bulk_data.get("dom_location_link", ""))
+
             if not location and body_text_head:
                 location = _extract_location_from_text(body_text_head)
+            if page_state_issue:
+                location = ""
 
             # ── 6. PROFILE PICTURE URL (multi-source resolution) ─────
             profile_picture_url = ""
@@ -1103,13 +1189,14 @@ class FacebookAnalyzer(AbstractAnalyzer):
             network_pic = captured_network.get("profile_pic_url") or ""
 
             # Source 1: DOM-extracted SVG/img elements (most accurate when found)
-            for candidate_url in svg_images:
-                if _is_valid_pfp(candidate_url):
-                    profile_picture_url = _upgrade_image_url(candidate_url)
-                    break
+            if not page_state_issue:
+                for candidate_url in svg_images:
+                    if _is_valid_pfp(candidate_url):
+                        profile_picture_url = _upgrade_image_url(candidate_url)
+                        break
 
             # Source 2: Network-intercepted GraphQL profile picture URL
-            if not profile_picture_url and network_pic and _is_valid_pfp(network_pic):
+            if not page_state_issue and not profile_picture_url and network_pic and _is_valid_pfp(network_pic):
                 profile_picture_url = _upgrade_image_url(network_pic)
                 logger.info(f"Using network-intercepted PFP URL for {url}")
 
@@ -1132,7 +1219,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
 
             # ── 8. GRAPH API + IMAGE DOWNLOAD (parallel) ─────────────
             # Always launch Graph API check — it's our strongest fallback
-            graph_id = captured_network.get("profile_id") or self._extract_username(url) or ""
+            graph_id = ""
+            if not page_state_issue:
+                graph_id = captured_network.get("profile_id") or self._extract_username(url) or ""
             graph_task = asyncio.create_task(
                 _check_graph_api_picture(graph_id)
             ) if graph_id else None
@@ -1151,8 +1240,10 @@ class FacebookAnalyzer(AbstractAnalyzer):
             except Exception:
                 page_source = ""
 
-            # Collect ALL unix timestamps from the full page source
-            all_unix_timestamps = list(bulk_data.get("unix_timestamps", []))
+            # Collect only contextual post timestamps from the full page source.
+            # The bulk JS list is intentionally not trusted for last_post_date
+            # because broad creation_time/publish_time keys can appear in page chrome.
+            all_unix_timestamps = []
             creation_timestamps = list(bulk_data.get("creation_timestamps", []))
             if page_source:
                 _append_unique_timestamps(
@@ -1166,6 +1257,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
             if page_state_issue:
                 all_unix_timestamps = []
                 creation_timestamps = []
+                captured_network["page_created"] = None
+                captured_network["joined"] = None
+                captured_network["joined_text"] = None
 
             iso_dates = bulk_data.get("iso_dates", [])
             text_dates = bulk_data.get("text_dates", [])
@@ -1319,9 +1413,9 @@ class FacebookAnalyzer(AbstractAnalyzer):
                 has_logo = False
                 logger.info(f"Logo=No (Graph API confirmed silhouette) for {url}")
             elif profile_picture_url and _is_valid_pfp(profile_picture_url):
-                # URL looks valid but couldn't download — give benefit of doubt
-                has_logo = True
-                logger.info(f"Logo=Yes (valid URL, download unavailable) for {url}")
+                # URL-only evidence is not strong enough to confirm a real logo.
+                has_logo = False
+                logger.info(f"Logo=No (valid-looking URL but no download/Graph confirmation) for {url}")
             else:
                 has_logo = False
                 logger.info(f"Logo=No (no valid image found) for {url}")
@@ -1335,7 +1429,7 @@ class FacebookAnalyzer(AbstractAnalyzer):
         finally:
             try:
                 page.remove_listener("response", _intercept_response)
-            except:
+            except Exception:
                 pass
 
         # ── MAP TO PROFILE RESULT ────────────────────────────────
